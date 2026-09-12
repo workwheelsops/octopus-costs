@@ -222,18 +222,31 @@ async function loadHistory(forceRefresh) {
     return;
   }
 
+  const hasSavings = data.months.some((m) => m.savingGBP != null);
+  document.getElementById("saving-header").hidden = !hasSavings;
+  document.getElementById("running-saving-header").hidden = !hasSavings;
+
   renderHistoryChart(data.months);
   document.getElementById("history-chart-section").hidden = false;
 
-  renderHistoryTable(data.months);
+  renderHistoryTable(data.months, hasSavings);
   document.getElementById("history-table-section").hidden = false;
 
   const generatedAt = res.headers.get("X-Cache-Generated-At");
   const note = document.getElementById("history-cache-note");
-  note.innerHTML = generatedAt
+  const switchInfo = data.debug?.switchSavings;
+  let noteHtml = generatedAt
     ? `Cached ${new Date(generatedAt).toLocaleString("en-GB")} (refreshes every 30 min) &middot; ` +
       `<a href="#" id="history-refresh-link">refresh now</a>`
     : "";
+  if (switchInfo) {
+    noteHtml +=
+      (noteHtml ? "<br>" : "") +
+      `Savings compared against ${switchInfo.baselineTariffCode} (your tariff immediately before ` +
+      `switching), using its real published rates for the same usage since ` +
+      `${new Date(switchInfo.switchDate).toLocaleDateString("en-GB")}.`;
+  }
+  note.innerHTML = noteHtml;
   const link = document.getElementById("history-refresh-link");
   if (link) {
     link.addEventListener("click", (e) => {
@@ -277,7 +290,7 @@ function renderHistoryChart(months) {
   }
 }
 
-function renderHistoryTable(months) {
+function renderHistoryTable(months, hasSavings) {
   const tbody = document.querySelector("#history-table tbody");
   tbody.innerHTML = "";
   for (const month of [...months].reverse()) {
@@ -290,6 +303,12 @@ function renderHistoryTable(months) {
       <td>${month.exportProfitGBP ? gbp.format(month.exportProfitGBP) : "&mdash;"}</td>
       <td>${month.axleVppProfitGBP ? gbp.format(month.axleVppProfitGBP) : "&mdash;"}</td>
       <td>${month.daysWithData ? gbp.format(month.netCostGBP) : "&mdash;"}</td>
+      ${
+        hasSavings
+          ? `<td>${month.savingGBP != null ? gbp.format(month.savingGBP) : "&mdash;"}</td>
+             <td>${month.runningSavingGBP != null ? gbp.format(month.runningSavingGBP) : "&mdash;"}</td>`
+          : ""
+      }
       <td><small>${tariffLabel}</small></td>
     `;
     tbody.appendChild(tr);
