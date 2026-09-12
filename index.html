@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Octopus Costs</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <main class="page">
+      <header class="page__header">
+        <h1>Octopus Costs</h1>
+        <p class="subtitle" id="subtitle">Electricity spend for this month</p>
+      </header>
+
+      <section id="status" class="status" hidden></section>
+
+      <section class="summary" id="summary" hidden>
+        <div class="card">
+          <span class="card__label">Total this month</span>
+          <span class="card__value" id="total-cost">&mdash;</span>
+        </div>
+        <div class="card">
+          <span class="card__label">Total electricity used</span>
+          <span class="card__value" id="total-kwh">&mdash;</span>
+        </div>
+        <div class="card">
+          <span class="card__label">Average daily cost</span>
+          <span class="card__value" id="avg-cost">&mdash;</span>
+        </div>
+        <div class="card">
+          <span class="card__label">Days so far</span>
+          <span class="card__value" id="day-count">&mdash;</span>
+        </div>
+      </section>
+
+      <section class="chart-section" id="chart-section" hidden>
+        <h2>Daily cost</h2>
+        <div id="chart" class="chart" role="img" aria-label="Daily electricity cost bar chart"></div>
+      </section>
+
+      <section class="table-section" id="table-section" hidden>
+        <h2>Daily breakdown</h2>
+        <div class="table-wrap">
+          <table id="days-table">
+            <thead>
+              <tr>
+                <th>Date</th>
+                <th>kWh</th>
+                <th>Standing charge</th>
+                <th>Cost</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+
+      <footer class="page__footer" id="footer" hidden>
+        Last updated <span id="generated-at">&mdash;</span>. Costs are estimated from published
+        Octopus unit rates and standing charges; they may differ slightly from your final bill.
+      </footer>
+    </main>
+
+    <script src="app.js"></script>
+  </body>
+</html>
