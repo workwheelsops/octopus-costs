@@ -208,10 +208,10 @@ function renderTable(days, hasExport) {
 
 const monthFormatter = new Intl.DateTimeFormat("en-GB", { month: "short", year: "numeric" });
 
-async function loadHistory() {
-  let data;
+async function loadHistory(forceRefresh) {
+  let res, data;
   try {
-    const res = await fetch("/api/history");
+    res = await fetch(forceRefresh ? "/api/history?refresh=1" : "/api/history");
     data = await res.json();
     if (!res.ok || !data.months) {
       showHistoryError(data.message || `Request failed (${res.status})`);
@@ -227,6 +227,21 @@ async function loadHistory() {
 
   renderHistoryTable(data.months);
   document.getElementById("history-table-section").hidden = false;
+
+  const generatedAt = res.headers.get("X-Cache-Generated-At");
+  const note = document.getElementById("history-cache-note");
+  note.innerHTML = generatedAt
+    ? `Cached ${new Date(generatedAt).toLocaleString("en-GB")} (refreshes every 30 min) &middot; ` +
+      `<a href="#" id="history-refresh-link">refresh now</a>`
+    : "";
+  const link = document.getElementById("history-refresh-link");
+  if (link) {
+    link.addEventListener("click", (e) => {
+      e.preventDefault();
+      note.textContent = "Refreshing…";
+      loadHistory(true);
+    });
+  }
 }
 
 function showHistoryError(message) {
