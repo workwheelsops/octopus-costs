@@ -46,9 +46,7 @@ async function main() {
   )}`;
 
   document.getElementById("total-cost").textContent = gbp.format(data.totalCostGBP);
-  document.getElementById("total-kwh").textContent = `${data.totalKwh.toFixed(1)} kWh`;
   document.getElementById("avg-cost").textContent = gbp.format(data.averageDailyCostGBP);
-  document.getElementById("day-count").textContent = data.days.length;
   document.getElementById("forecast-cost").textContent = gbp.format(data.forecastCostGBP ?? 0);
   document.getElementById("forecast-sub").textContent = `over ${data.daysInMonth ?? "?"} days`;
   document.getElementById("offpeak-cost").textContent = gbp.format(data.totalOffPeakCostGBP ?? 0);
@@ -225,6 +223,13 @@ async function loadHistory(forceRefresh) {
   const hasSavings = data.months.some((m) => m.savingGBP != null);
   document.getElementById("saving-header").hidden = !hasSavings;
   document.getElementById("running-saving-header").hidden = !hasSavings;
+
+  const monthsWithRunningTotal = data.months.filter((m) => m.runningSavingGBP != null);
+  const latestRunningTotal = monthsWithRunningTotal[monthsWithRunningTotal.length - 1];
+  document.getElementById("running-saving-card").hidden = !latestRunningTotal;
+  if (latestRunningTotal) {
+    document.getElementById("running-saving").textContent = gbp.format(latestRunningTotal.runningSavingGBP);
+  }
 
   renderHistoryChart(data.months);
   document.getElementById("history-chart-section").hidden = false;
