@@ -133,7 +133,7 @@ export async function computeCosts(env) {
           const kwh = slot.consumption;
           totalExportKwh += kwh;
           const slotInstant = new Date(slot.interval_start);
-          const rate = lookupRate(slot.interval_start, slotInstant, exportRateContext);
+          const rate = lookupRate(slotInstant, exportRateContext);
           if (rate == null) {
             slotsWithNoRate++;
             continue;
@@ -163,7 +163,7 @@ export async function computeCosts(env) {
       const kwh = slot.consumption;
       const slotInstant = new Date(slot.interval_start);
       const offPeak = isOffPeakLondonTime(slotInstant);
-      const rate = lookupRate(slot.interval_start, slotInstant, rateContext);
+      const rate = lookupRate(slotInstant, rateContext);
       const dateKey = londonDateKey(slotInstant);
       const entry =
         dayMap.get(dateKey) ||
@@ -223,7 +223,7 @@ export async function computeCosts(env) {
     const totalExportProfitGBP = round(days.reduce((sum, d) => sum + d.exportProfitGBP, 0), 2);
 
     const sampleSlot = consumption[0];
-    const sampleRateKeys = [...rateMap.keys()].slice(0, 3);
+    const sampleRateKeys = [...rateMap.keys()].slice(0, 3).map((t) => new Date(t).toISOString());
 
     return json({
       accountNumber,
@@ -271,7 +271,7 @@ export async function computeCosts(env) {
 // only publish flat day/night rates (e.g. Intelligent Octopus Go), plus
 // standingSegments (irrelevant for export meter points, but harmless).
 async function buildRateContext(agreements, monthStart, periodEnd, authHeader) {
-  const rateMap = new Map(); // interval_start ISO -> value_inc_vat (pence)
+  const rateMap = new Map(); // instant (ms since epoch) -> value_inc_vat (pence)
   const standingSegments = []; // { segStart, segEnd, charges: [...] }
   const dayNightSegments = []; // { segStart, segEnd, dayRates: [...], nightRates: [...] }
   const tariffSegments = []; // debug: what was queried and what came back
@@ -313,7 +313,11 @@ async function buildRateContext(agreements, monthStart, periodEnd, authHeader) {
           `?period_from=${segStart.toISOString()}&period_to=${segEnd.toISOString()}&page_size=25000`,
         authHeader
       );
-      for (const r of rates) rateMap.set(r.valid_from, r.value_inc_vat);
+      // Key by instant, not the raw string: Octopus's consumption endpoint
+      // can return interval_start with a local UTC offset (e.g. "+01:00"
+      // during BST) while rates' valid_from uses "Z" for the same instant,
+      // so string equality would silently miss every match.
+      for (const r of rates) rateMap.set(new Date(r.valid_from).getTime(), r.value_inc_vat);
       segmentDebug.rateRecordCount = rates.length;
 
       if (rates.length === 0) {
@@ -378,8 +382,8 @@ async function buildRateContext(agreements, monthStart, periodEnd, authHeader) {
 
 // Looks up the rate (pence/kWh inc VAT) for one consumption slot: first the
 // half-hourly rateMap, then the day/night fallback if that misses.
-function lookupRate(intervalStartISO, slotInstant, rateContext) {
-  const rate = rateContext.rateMap.get(intervalStartISO);
+function lookupRate(slotInstant, rateContext) {
+  const rate = rateContext.rateMap.get(slotInstant.getTime());
   if (rate != null) return rate;
   const seg = rateContext.dayNightSegments.find(
     (s) => slotInstant >= s.segStart && slotInstant < s.segEnd
