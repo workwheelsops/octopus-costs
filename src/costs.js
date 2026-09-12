@@ -65,6 +65,19 @@ export async function computeCosts(env) {
       authHeader
     );
 
+    // If this month is empty, check whether the meter has ever reported any
+    // half-hourly data via the API at all (helps tell "meter isn't smart /
+    // hasn't shared data yet" apart from "just this month is missing").
+    let mostRecentReadingAt = null;
+    if (consumption.length === 0) {
+      const latest = await octopusGet(
+        `${OCTOPUS_BASE}/electricity-meter-points/${mpan}/meters/${serial}/consumption/` +
+          `?page_size=1&order_by=-period`,
+        authHeader
+      ).catch(() => null);
+      mostRecentReadingAt = latest?.results?.[0]?.interval_start ?? null;
+    }
+
     const rateMap = new Map(); // interval_start ISO -> value_inc_vat (pence)
     const standingSegments = []; // { segStart, segEnd, charges: [...] }
 
@@ -149,6 +162,7 @@ export async function computeCosts(env) {
         periodFrom: monthStart.toISOString(),
         periodTo: periodEnd.toISOString(),
         rawConsumptionRecordCount: consumption.length,
+        mostRecentReadingAt,
       },
     });
   } catch (err) {

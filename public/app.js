@@ -30,6 +30,13 @@ async function main() {
       (d.meterPointMpans
         ? ": " + d.meterPointMpans.map((mp) => `${mp.mpan}${mp.isExport ? " (export)" : ""}`).join(", ")
         : "") +
+      (d.mostRecentReadingAt
+        ? `<br>Most recent reading Octopus has for this meter: ${new Date(
+            d.mostRecentReadingAt
+          ).toLocaleString("en-GB")}`
+        : d.mostRecentReadingAt === null
+        ? "<br>Octopus has no readings at all for this meter via the API."
+        : "") +
       "</small>";
     return;
   }
