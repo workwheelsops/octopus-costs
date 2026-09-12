@@ -92,6 +92,7 @@ export async function computeCosts(env) {
 
     const rateMap = new Map(); // interval_start ISO -> value_inc_vat (pence)
     const standingSegments = []; // { segStart, segEnd, charges: [...] }
+    const tariffSegments = []; // debug: what was queried and what came back
 
     for (const agreement of agreements) {
       const validFrom = new Date(agreement.valid_from);
@@ -102,21 +103,36 @@ export async function computeCosts(env) {
 
       const tariffCode = agreement.tariff_code;
       const productCode = parseProductCode(tariffCode);
-      if (!tariffCode || !productCode) continue;
+      const segmentDebug = { tariffCode, productCode, segStart: segStart.toISOString(), segEnd: segEnd.toISOString() };
+      tariffSegments.push(segmentDebug);
+      if (!tariffCode || !productCode) {
+        segmentDebug.error = "Could not derive a product code from this tariff code.";
+        continue;
+      }
 
-      const rates = await fetchAllPages(
-        `${OCTOPUS_BASE}/products/${productCode}/electricity-tariffs/${tariffCode}/standard-unit-rates/` +
-          `?period_from=${segStart.toISOString()}&period_to=${segEnd.toISOString()}&page_size=25000`,
-        authHeader
-      ).catch(() => []);
-      for (const r of rates) rateMap.set(r.valid_from, r.value_inc_vat);
+      try {
+        const rates = await fetchAllPages(
+          `${OCTOPUS_BASE}/products/${productCode}/electricity-tariffs/${tariffCode}/standard-unit-rates/` +
+            `?period_from=${segStart.toISOString()}&period_to=${segEnd.toISOString()}&page_size=25000`,
+          authHeader
+        );
+        for (const r of rates) rateMap.set(r.valid_from, r.value_inc_vat);
+        segmentDebug.rateRecordCount = rates.length;
+      } catch (err) {
+        segmentDebug.rateError = err.message;
+      }
 
-      const charges = await fetchAllPages(
-        `${OCTOPUS_BASE}/products/${productCode}/electricity-tariffs/${tariffCode}/standing-charges/` +
-          `?period_from=${segStart.toISOString()}&period_to=${segEnd.toISOString()}&page_size=25000`,
-        authHeader
-      ).catch(() => []);
-      standingSegments.push({ segStart, segEnd, charges });
+      try {
+        const charges = await fetchAllPages(
+          `${OCTOPUS_BASE}/products/${productCode}/electricity-tariffs/${tariffCode}/standing-charges/` +
+            `?period_from=${segStart.toISOString()}&period_to=${segEnd.toISOString()}&page_size=25000`,
+          authHeader
+        );
+        standingSegments.push({ segStart, segEnd, charges });
+        segmentDebug.standingChargeRecordCount = charges.length;
+      } catch (err) {
+        segmentDebug.standingChargeError = err.message;
+      }
     }
 
     const dayMap = new Map(); // londonDateKey -> { kwh, costPence, missingRate }
@@ -156,6 +172,9 @@ export async function computeCosts(env) {
     const totalCostPence = days.reduce((sum, d) => sum + d.costGBP * 100, 0);
     const totalKwh = days.reduce((sum, d) => sum + d.kwh, 0);
 
+    const sampleSlot = consumption[0];
+    const sampleRateKeys = [...rateMap.keys()].slice(0, 3);
+
     return json({
       accountNumber,
       mpan,
@@ -176,6 +195,10 @@ export async function computeCosts(env) {
         periodTo: periodEnd.toISOString(),
         rawConsumptionRecordCount: consumption.length,
         mostRecentReadingAt,
+        tariffSegments,
+        rateMapSize: rateMap.size,
+        sampleConsumptionIntervalStart: sampleSlot?.interval_start ?? null,
+        sampleRateKeys,
       },
     });
   } catch (err) {

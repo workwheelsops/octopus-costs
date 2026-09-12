@@ -61,6 +61,36 @@ async function main() {
     "en-GB"
   );
   document.getElementById("footer").hidden = false;
+
+  const estimatedDays = data.days.filter((d) => d.estimated).length;
+  if (estimatedDays > 0) {
+    statusEl.hidden = false;
+    statusEl.innerHTML = renderRateDebug(data, estimatedDays);
+  }
+}
+
+function renderRateDebug(data, estimatedDays) {
+  const d = data.debug || {};
+  const segments = (d.tariffSegments || [])
+    .map((s) => {
+      const bits = [`tariff <code>${s.tariffCode ?? "?"}</code>`, `product <code>${s.productCode ?? "?"}</code>`];
+      if (s.error) bits.push(`error: ${s.error}`);
+      if (s.rateError) bits.push(`rate fetch error: ${s.rateError}`);
+      if (s.rateRecordCount != null) bits.push(`${s.rateRecordCount} rate records`);
+      if (s.standingChargeError) bits.push(`standing charge fetch error: ${s.standingChargeError}`);
+      return bits.join(", ");
+    })
+    .join("<br>");
+
+  return (
+    `${estimatedDays} of ${data.days.length} day(s) are missing a unit rate match, so only the ` +
+    "standing charge is included for them.<br>" +
+    `<small>Rate map has ${d.rateMapSize ?? "?"} entries. ` +
+    `Sample consumption interval_start: <code>${d.sampleConsumptionIntervalStart ?? "?"}</code>. ` +
+    `Sample rate keys: <code>${(d.sampleRateKeys || []).join(", ") || "none"}</code>.<br>` +
+    (segments ? segments + "<br>" : "") +
+    "</small>"
+  );
 }
 
 function renderChart(days) {
