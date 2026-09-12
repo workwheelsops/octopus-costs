@@ -396,7 +396,9 @@ async function computeDailyBreakdown(env, rangeStart, rangeEnd, { includeProduct
         offPeakCostPence: 0,
         onPeakKwh: 0,
         onPeakCostPence: 0,
+        slotCount: 0,
       };
+    entry.slotCount++;
     entry.kwh += kwh;
     if (offPeak) entry.offPeakKwh += kwh;
     else entry.onPeakKwh += kwh;
@@ -422,6 +424,11 @@ async function computeDailyBreakdown(env, rangeStart, rangeEnd, { includeProduct
 
   const days = [...dayMap.entries()]
     .sort(([a], [b]) => (a < b ? -1 : 1))
+    // Drop days that don't have a full set of half-hourly readings yet
+    // (usually today, or the most recent day, due to Octopus's normal
+    // reporting lag) - otherwise they'd show a misleadingly low cost and
+    // skew "days so far" / totals / the chart.
+    .filter(([date, e]) => e.slotCount >= expectedSlotsForDay(date))
     .map(([date, e]) => ({
       date,
       kwh: round(e.kwh, 3),
@@ -964,6 +971,17 @@ function londonDateKey(date) {
 function londonDateKeyToUTC(dateKey) {
   const [y, m, d] = dateKey.split("-").map(Number);
   return londonWallTimeToUTC(y, m, d, 0, 0, 0);
+}
+
+// Number of half-hour slots a London calendar day actually has: normally
+// 48, but 46 or 50 on the two clock-change days each year. Date.UTC (inside
+// londonWallTimeToUTC) normalizes an overflowing day-of-month automatically,
+// so d + 1 correctly rolls into the next month/year too.
+function expectedSlotsForDay(dateKey) {
+  const [y, m, d] = dateKey.split("-").map(Number);
+  const dayStart = londonWallTimeToUTC(y, m, d, 0, 0, 0);
+  const nextDayStart = londonWallTimeToUTC(y, m, d + 1, 0, 0, 0);
+  return (nextDayStart.getTime() - dayStart.getTime()) / (30 * 60 * 1000);
 }
 
 function getDaysInLondonMonth(monthStart) {
