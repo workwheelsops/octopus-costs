@@ -213,8 +213,12 @@ async function loadHistory() {
   try {
     const res = await fetch("/api/history");
     data = await res.json();
-    if (!res.ok || !data.months) return;
+    if (!res.ok || !data.months) {
+      showHistoryError(data.message || `Request failed (${res.status})`);
+      return;
+    }
   } catch (err) {
+    showHistoryError(`Could not reach the API: ${err.message}`);
     return;
   }
 
@@ -223,6 +227,12 @@ async function loadHistory() {
 
   renderHistoryTable(data.months);
   document.getElementById("history-table-section").hidden = false;
+}
+
+function showHistoryError(message) {
+  const el = document.getElementById("history-chart-section");
+  el.hidden = false;
+  el.innerHTML = `<h2>Last 24 months</h2><p class="status">${message}</p>`;
 }
 
 function renderHistoryChart(months) {
