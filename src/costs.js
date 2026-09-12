@@ -547,7 +547,23 @@ async function buildRateContext(
         // slot after each such change, so keep the raw records too and fall
         // back to interval-containment matching (lookupRate) when the map
         // misses - cheap since it only runs for the slots that need it.
-        rateSegments.push({ segStart, segEnd, rates });
+        const distinctValues = [...new Set(rates.map((r) => r.value_inc_vat))];
+        // A handful of distinct values repeating over many records (as
+        // opposed to genuine Agile, where almost every record is a unique
+        // half-hourly price) means this is really a disguised day/night
+        // tariff published via standard-unit-rates instead of the dedicated
+        // day/night endpoints - so the same "EV charging outside the window
+        // still gets the cheap rate" rule should apply here too.
+        const isLikelyFixedDualRate = distinctValues.length <= 4;
+        segmentDebug.distinctRateValueCount = distinctValues.length;
+        segmentDebug.isLikelyFixedDualRate = isLikelyFixedDualRate;
+        rateSegments.push({
+          segStart,
+          segEnd,
+          rates,
+          minRate: Math.min(...distinctValues),
+          isLikelyFixedDualRate,
+        });
       }
 
       if (rates.length === 0) {
@@ -612,22 +628,37 @@ async function buildRateContext(
   return { rateMap, rateSegments, standingSegments, dayNightSegments, tariffSegments };
 }
 
-// Looks up the rate (pence/kWh inc VAT) for one consumption slot: first the
-// half-hourly rateMap, then the day/night fallback if that misses.
+// Looks up the rate (pence/kWh inc VAT) for one consumption slot: the
+// half-hourly rateMap (exact instant match) or interval-containment fallback
+// for the same segment, then the day/night fallback if neither has anything.
 function lookupRate(slotInstant, kwh, rateContext, dispatchWindows, evThresholdKwh) {
-  const exactRate = rateContext.rateMap.get(slotInstant.getTime());
-  if (exactRate != null) return exactRate;
-
-  // Exact-instant match missed: either this tariff's standard-unit-rates
-  // records don't align one-to-one with consumption slots (a "fixed" tariff
-  // with a handful of wide-validity records rather than true half-hourly
-  // ones), or there's a genuine gap. Fall back to interval containment.
   const rateSeg = rateContext.rateSegments.find(
     (s) => slotInstant >= s.segStart && slotInstant < s.segEnd
   );
-  if (rateSeg) {
-    const rate = findActiveRate(rateSeg.rates, slotInstant);
-    if (rate != null) return rate;
+
+  // Exact-instant match first (the common case for genuine half-hourly
+  // tariffs); fall back to interval containment for sparse ones where most
+  // slots fall inside a wider validity window rather than matching exactly.
+  let rate = rateContext.rateMap.get(slotInstant.getTime());
+  if (rate == null && rateSeg) {
+    rate = findActiveRate(rateSeg.rates, slotInstant);
+  }
+
+  if (rate != null) {
+    // Intelligent Octopus Go-style tariffs bill EV smart-charge sessions at
+    // the off-peak rate regardless of clock time. Some standard-unit-rates
+    // tariffs are really a disguised day/night tariff (see
+    // isLikelyFixedDualRate) rather than genuine Agile, so the same rule
+    // should apply there too - whichever path supplied the exact rate.
+    if (
+      rateSeg?.isLikelyFixedDualRate &&
+      kwh >= evThresholdKwh &&
+      !isStandardOffPeakWindow(slotInstant) &&
+      rateSeg.minRate < rate
+    ) {
+      return rateSeg.minRate;
+    }
+    return rate;
   }
 
   const dayNightSeg = rateContext.dayNightSegments.find(
