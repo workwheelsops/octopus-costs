@@ -53,12 +53,20 @@ async function main() {
   document.getElementById("offpeak-kwh").textContent = `${(data.totalOffPeakKwh ?? 0).toFixed(1)} kWh`;
   document.getElementById("onpeak-cost").textContent = gbp.format(data.totalOnPeakCostGBP ?? 0);
   document.getElementById("onpeak-kwh").textContent = `${(data.totalOnPeakKwh ?? 0).toFixed(1)} kWh`;
+
+  const hasExport = !!data.debug?.export;
+  document.getElementById("export-card").hidden = !hasExport;
+  document.getElementById("export-header").hidden = !hasExport;
+  if (hasExport) {
+    document.getElementById("export-profit").textContent = gbp.format(data.totalExportProfitGBP ?? 0);
+  }
+
   document.getElementById("summary").hidden = false;
 
   renderChart(data.days);
   document.getElementById("chart-section").hidden = false;
 
-  renderTable(data.days);
+  renderTable(data.days, hasExport);
   document.getElementById("table-section").hidden = false;
 
   document.getElementById("generated-at").textContent = new Date(data.generatedAt).toLocaleString(
@@ -147,7 +155,7 @@ function renderChart(days) {
   }
 }
 
-function renderTable(days) {
+function renderTable(days, hasExport) {
   const tbody = document.querySelector("#days-table tbody");
   tbody.innerHTML = "";
   for (const day of [...days].reverse()) {
@@ -159,6 +167,7 @@ function renderTable(days) {
       <td>${gbp.format(day.onPeakCostGBP)}</td>
       <td>${gbp.format(day.standingChargeGBP)}</td>
       <td>${gbp.format(day.costGBP)}${day.estimated ? " *" : ""}</td>
+      ${hasExport ? `<td>${gbp.format(day.exportProfitGBP)}</td>` : ""}
     `;
     tbody.appendChild(tr);
   }

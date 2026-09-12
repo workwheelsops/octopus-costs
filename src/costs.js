@@ -90,105 +90,58 @@ export async function computeCosts(env) {
       mostRecentReadingAt = latest?.results?.[0]?.interval_start ?? null;
     }
 
-    const rateMap = new Map(); // interval_start ISO -> value_inc_vat (pence)
-    const standingSegments = []; // { segStart, segEnd, charges: [...] }
-    const dayNightSegments = []; // { segStart, segEnd, dayRates: [...], nightRates: [...] }
-    const tariffSegments = []; // debug: what was queried and what came back
+    const rateContext = await buildRateContext(agreements, monthStart, periodEnd, authHeader);
+    const { rateMap, dayNightSegments, standingSegments, tariffSegments } = rateContext;
 
-    for (const agreement of agreements) {
-      const validFrom = new Date(agreement.valid_from);
-      const validTo = agreement.valid_to ? new Date(agreement.valid_to) : periodEnd;
-      const segStart = maxDate(validFrom, monthStart);
-      const segEnd = minDate(validTo, periodEnd);
-      if (segStart >= segEnd) continue;
+    // Export: many solar accounts have a second, export-only meter point.
+    // Auto-detect it and price its consumption (= energy sent to the grid)
+    // the same way, to work out export earnings per day.
+    const exportMeterPoint = env.OCTOPUS_EXPORT_MPAN
+      ? meterPoints.find((mp) => mp.mpan === env.OCTOPUS_EXPORT_MPAN)
+      : meterPoints.find((mp) => mp.is_export);
+    const exportByDate = new Map(); // londonDateKey -> profitPence
+    let exportDebug = null;
 
-      const tariffCode = agreement.tariff_code;
-      const productCode = parseProductCode(tariffCode);
-      const segmentDebug = { tariffCode, productCode, segStart: segStart.toISOString(), segEnd: segEnd.toISOString() };
-      tariffSegments.push(segmentDebug);
-      if (!tariffCode || !productCode) {
-        segmentDebug.error = "Could not derive a product code from this tariff code.";
-        continue;
-      }
-
-      const product = await octopusGet(`${OCTOPUS_BASE}/products/${productCode}/`, authHeader).catch(
-        (e) => ({ error: e.message })
-      );
-      segmentDebug.product = product?.error
-        ? { error: product.error }
-        : {
-            fullName: product.full_name,
-            displayName: product.display_name,
-            isVariable: product.is_variable,
-            isBusiness: product.is_business,
-            direction: product.direction,
-            availableFrom: product.available_from,
-            availableTo: product.available_to,
-          };
-
-      try {
-        const rates = await fetchAllPages(
-          `${OCTOPUS_BASE}/products/${productCode}/electricity-tariffs/${tariffCode}/standard-unit-rates/` +
-            `?period_from=${segStart.toISOString()}&period_to=${segEnd.toISOString()}&page_size=25000`,
-          authHeader
-        );
-        for (const r of rates) rateMap.set(r.valid_from, r.value_inc_vat);
-        segmentDebug.rateRecordCount = rates.length;
-
-        if (rates.length === 0) {
-          // Some fixed dual-rate tariffs (e.g. Intelligent Octopus Go) don't
-          // publish half-hourly rates via standard-unit-rates at all; they
-          // expose one flat day rate and one flat night rate instead.
-          const dayRates = await fetchAllPages(
-            `${OCTOPUS_BASE}/products/${productCode}/electricity-tariffs/${tariffCode}/day-unit-rates/` +
-              `?period_from=${segStart.toISOString()}&period_to=${segEnd.toISOString()}&page_size=25000`,
-            authHeader
-          ).catch(() => []);
-          const nightRates = await fetchAllPages(
-            `${OCTOPUS_BASE}/products/${productCode}/electricity-tariffs/${tariffCode}/night-unit-rates/` +
-              `?period_from=${segStart.toISOString()}&period_to=${segEnd.toISOString()}&page_size=25000`,
-            authHeader
-          ).catch(() => []);
-          segmentDebug.dayRateRecordCount = dayRates.length;
-          segmentDebug.nightRateRecordCount = nightRates.length;
-
-          if (dayRates.length > 0 || nightRates.length > 0) {
-            dayNightSegments.push({ segStart, segEnd, dayRates, nightRates });
-          } else {
-            // Genuinely nothing published anywhere for this tariff: probe
-            // with no date filter to confirm it's not just this window.
-            const probe = await octopusGet(
-              `${OCTOPUS_BASE}/products/${productCode}/electricity-tariffs/${tariffCode}/standard-unit-rates/?page_size=3`,
-              authHeader
-            ).catch((e) => ({ error: e.message }));
-            if (probe?.error) {
-              segmentDebug.rateProbeError = probe.error;
-            } else {
-              segmentDebug.rateProbe = {
-                totalCountEver: probe?.count ?? null,
-                sample: (probe?.results || []).map((r) => ({
-                  valid_from: r.valid_from,
-                  valid_to: r.valid_to,
-                  value_inc_vat: r.value_inc_vat,
-                })),
-              };
-            }
+    if (exportMeterPoint) {
+      const exportMeters = exportMeterPoint.meters || [];
+      const exportMeter = env.OCTOPUS_EXPORT_METER_SERIAL
+        ? exportMeters.find((m) => m.serial_number === env.OCTOPUS_EXPORT_METER_SERIAL) || {
+            serial_number: env.OCTOPUS_EXPORT_METER_SERIAL,
           }
-        }
-      } catch (err) {
-        segmentDebug.rateError = err.message;
-      }
+        : exportMeters[exportMeters.length - 1];
 
-      try {
-        const charges = await fetchAllPages(
-          `${OCTOPUS_BASE}/products/${productCode}/electricity-tariffs/${tariffCode}/standing-charges/` +
-            `?period_from=${segStart.toISOString()}&period_to=${segEnd.toISOString()}&page_size=25000`,
+      if (exportMeter) {
+        const exportMpan = exportMeterPoint.mpan;
+        const exportSerial = exportMeter.serial_number;
+        const exportConsumption = await fetchAllPages(
+          `${OCTOPUS_BASE}/electricity-meter-points/${exportMpan}/meters/${exportSerial}/consumption/` +
+            `?period_from=${monthStart.toISOString()}&period_to=${periodEnd.toISOString()}` +
+            `&page_size=25000&order_by=period`,
+          authHeader
+        ).catch(() => []);
+
+        const exportRateContext = await buildRateContext(
+          exportMeterPoint.agreements || [],
+          monthStart,
+          periodEnd,
           authHeader
         );
-        standingSegments.push({ segStart, segEnd, charges });
-        segmentDebug.standingChargeRecordCount = charges.length;
-      } catch (err) {
-        segmentDebug.standingChargeError = err.message;
+
+        for (const slot of exportConsumption) {
+          const kwh = slot.consumption;
+          const slotInstant = new Date(slot.interval_start);
+          const rate = lookupRate(slot.interval_start, slotInstant, exportRateContext);
+          if (rate == null) continue;
+          const dateKey = londonDateKey(slotInstant);
+          exportByDate.set(dateKey, (exportByDate.get(dateKey) || 0) + kwh * rate);
+        }
+
+        exportDebug = {
+          mpan: exportMpan,
+          meterSerial: exportSerial,
+          rawConsumptionRecordCount: exportConsumption.length,
+          tariffSegments: exportRateContext.tariffSegments,
+        };
       }
     }
 
@@ -198,14 +151,7 @@ export async function computeCosts(env) {
       const kwh = slot.consumption;
       const slotInstant = new Date(slot.interval_start);
       const offPeak = isOffPeakLondonTime(slotInstant);
-      let rate = rateMap.get(slot.interval_start);
-      if (rate == null) {
-        const seg = dayNightSegments.find((s) => slotInstant >= s.segStart && slotInstant < s.segEnd);
-        if (seg) {
-          const rates = offPeak ? seg.nightRates : seg.dayRates;
-          rate = findActiveRate(rates, slotInstant);
-        }
-      }
+      const rate = lookupRate(slot.interval_start, slotInstant, rateContext);
       const dateKey = londonDateKey(slotInstant);
       const entry =
         dayMap.get(dateKey) ||
@@ -238,6 +184,7 @@ export async function computeCosts(env) {
       entry.standingChargePence = standingChargePence ?? 0;
       entry.costPence += entry.standingChargePence;
       if (standingChargePence == null) entry.missingRate = true;
+      entry.exportProfitPence = exportByDate.get(dateKey) ?? 0;
     }
 
     const days = [...dayMap.entries()]
@@ -251,6 +198,7 @@ export async function computeCosts(env) {
         offPeakCostGBP: round(e.offPeakCostPence / 100, 2),
         onPeakKwh: round(e.onPeakKwh, 3),
         onPeakCostGBP: round(e.onPeakCostPence / 100, 2),
+        exportProfitGBP: round(e.exportProfitPence / 100, 2),
         estimated: e.missingRate,
       }));
 
@@ -260,6 +208,7 @@ export async function computeCosts(env) {
     const totalOnPeakCostGBP = round(days.reduce((sum, d) => sum + d.onPeakCostGBP, 0), 2);
     const totalOffPeakKwh = round(days.reduce((sum, d) => sum + d.offPeakKwh, 0), 2);
     const totalOnPeakKwh = round(days.reduce((sum, d) => sum + d.onPeakKwh, 0), 2);
+    const totalExportProfitGBP = round(days.reduce((sum, d) => sum + d.exportProfitGBP, 0), 2);
 
     const sampleSlot = consumption[0];
     const sampleRateKeys = [...rateMap.keys()].slice(0, 3);
@@ -275,6 +224,7 @@ export async function computeCosts(env) {
       totalOnPeakCostGBP,
       totalOffPeakKwh,
       totalOnPeakKwh,
+      totalExportProfitGBP,
       averageDailyCostGBP: days.length ? round(totalCostPence / 100 / days.length, 2) : 0,
       monthStart: monthStart.toISOString(),
       generatedAt: new Date().toISOString(),
@@ -292,6 +242,7 @@ export async function computeCosts(env) {
         rateMapSize: rateMap.size,
         sampleConsumptionIntervalStart: sampleSlot?.interval_start ?? null,
         sampleRateKeys,
+        export: exportDebug,
       },
     });
   } catch (err) {
@@ -300,6 +251,130 @@ export async function computeCosts(env) {
       err.status || 502
     );
   }
+}
+
+// Builds a rate lookup for a set of agreements (from one meter point) over
+// [monthStart, periodEnd]: a half-hourly rateMap for tariffs that publish
+// standard-unit-rates, plus dayNightSegments as a fallback for tariffs that
+// only publish flat day/night rates (e.g. Intelligent Octopus Go), plus
+// standingSegments (irrelevant for export meter points, but harmless).
+async function buildRateContext(agreements, monthStart, periodEnd, authHeader) {
+  const rateMap = new Map(); // interval_start ISO -> value_inc_vat (pence)
+  const standingSegments = []; // { segStart, segEnd, charges: [...] }
+  const dayNightSegments = []; // { segStart, segEnd, dayRates: [...], nightRates: [...] }
+  const tariffSegments = []; // debug: what was queried and what came back
+
+  for (const agreement of agreements) {
+    const validFrom = new Date(agreement.valid_from);
+    const validTo = agreement.valid_to ? new Date(agreement.valid_to) : periodEnd;
+    const segStart = maxDate(validFrom, monthStart);
+    const segEnd = minDate(validTo, periodEnd);
+    if (segStart >= segEnd) continue;
+
+    const tariffCode = agreement.tariff_code;
+    const productCode = parseProductCode(tariffCode);
+    const segmentDebug = { tariffCode, productCode, segStart: segStart.toISOString(), segEnd: segEnd.toISOString() };
+    tariffSegments.push(segmentDebug);
+    if (!tariffCode || !productCode) {
+      segmentDebug.error = "Could not derive a product code from this tariff code.";
+      continue;
+    }
+
+    const product = await octopusGet(`${OCTOPUS_BASE}/products/${productCode}/`, authHeader).catch(
+      (e) => ({ error: e.message })
+    );
+    segmentDebug.product = product?.error
+      ? { error: product.error }
+      : {
+          fullName: product.full_name,
+          displayName: product.display_name,
+          isVariable: product.is_variable,
+          isBusiness: product.is_business,
+          direction: product.direction,
+          availableFrom: product.available_from,
+          availableTo: product.available_to,
+        };
+
+    try {
+      const rates = await fetchAllPages(
+        `${OCTOPUS_BASE}/products/${productCode}/electricity-tariffs/${tariffCode}/standard-unit-rates/` +
+          `?period_from=${segStart.toISOString()}&period_to=${segEnd.toISOString()}&page_size=25000`,
+        authHeader
+      );
+      for (const r of rates) rateMap.set(r.valid_from, r.value_inc_vat);
+      segmentDebug.rateRecordCount = rates.length;
+
+      if (rates.length === 0) {
+        // Some fixed dual-rate tariffs (e.g. Intelligent Octopus Go) don't
+        // publish half-hourly rates via standard-unit-rates at all; they
+        // expose one flat day rate and one flat night rate instead.
+        const dayRates = await fetchAllPages(
+          `${OCTOPUS_BASE}/products/${productCode}/electricity-tariffs/${tariffCode}/day-unit-rates/` +
+            `?period_from=${segStart.toISOString()}&period_to=${segEnd.toISOString()}&page_size=25000`,
+          authHeader
+        ).catch(() => []);
+        const nightRates = await fetchAllPages(
+          `${OCTOPUS_BASE}/products/${productCode}/electricity-tariffs/${tariffCode}/night-unit-rates/` +
+            `?period_from=${segStart.toISOString()}&period_to=${segEnd.toISOString()}&page_size=25000`,
+          authHeader
+        ).catch(() => []);
+        segmentDebug.dayRateRecordCount = dayRates.length;
+        segmentDebug.nightRateRecordCount = nightRates.length;
+
+        if (dayRates.length > 0 || nightRates.length > 0) {
+          dayNightSegments.push({ segStart, segEnd, dayRates, nightRates });
+        } else {
+          // Genuinely nothing published anywhere for this tariff: probe
+          // with no date filter to confirm it's not just this window.
+          const probe = await octopusGet(
+            `${OCTOPUS_BASE}/products/${productCode}/electricity-tariffs/${tariffCode}/standard-unit-rates/?page_size=3`,
+            authHeader
+          ).catch((e) => ({ error: e.message }));
+          if (probe?.error) {
+            segmentDebug.rateProbeError = probe.error;
+          } else {
+            segmentDebug.rateProbe = {
+              totalCountEver: probe?.count ?? null,
+              sample: (probe?.results || []).map((r) => ({
+                valid_from: r.valid_from,
+                valid_to: r.valid_to,
+                value_inc_vat: r.value_inc_vat,
+              })),
+            };
+          }
+        }
+      }
+    } catch (err) {
+      segmentDebug.rateError = err.message;
+    }
+
+    try {
+      const charges = await fetchAllPages(
+        `${OCTOPUS_BASE}/products/${productCode}/electricity-tariffs/${tariffCode}/standing-charges/` +
+          `?period_from=${segStart.toISOString()}&period_to=${segEnd.toISOString()}&page_size=25000`,
+        authHeader
+      );
+      standingSegments.push({ segStart, segEnd, charges });
+      segmentDebug.standingChargeRecordCount = charges.length;
+    } catch (err) {
+      segmentDebug.standingChargeError = err.message;
+    }
+  }
+
+  return { rateMap, standingSegments, dayNightSegments, tariffSegments };
+}
+
+// Looks up the rate (pence/kWh inc VAT) for one consumption slot: first the
+// half-hourly rateMap, then the day/night fallback if that misses.
+function lookupRate(intervalStartISO, slotInstant, rateContext) {
+  const rate = rateContext.rateMap.get(intervalStartISO);
+  if (rate != null) return rate;
+  const seg = rateContext.dayNightSegments.find(
+    (s) => slotInstant >= s.segStart && slotInstant < s.segEnd
+  );
+  if (!seg) return null;
+  const rates = isOffPeakLondonTime(slotInstant) ? seg.nightRates : seg.dayRates;
+  return findActiveRate(rates, slotInstant);
 }
 
 async function octopusGet(url, authHeader) {

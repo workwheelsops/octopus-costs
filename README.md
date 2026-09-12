@@ -35,6 +35,11 @@ one), set these optional secrets to pin the exact meter:
 - `OCTOPUS_MPAN` — the exact meter point (MPAN) to use.
 - `OCTOPUS_METER_SERIAL` — the exact meter serial number to use.
 
+If your account also has a solar export meter point, it's auto-detected
+(`is_export: true`) and priced the same way to show export profit per day.
+Override with `OCTOPUS_EXPORT_MPAN` / `OCTOPUS_EXPORT_METER_SERIAL` if
+auto-detection picks the wrong one.
+
 Gas is not included.
 
 ## Prerequisites
