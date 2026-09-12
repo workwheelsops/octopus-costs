@@ -47,7 +47,13 @@ export async function computeCosts(env) {
       ? round((totalCostPence / 100 - totalExportProfitGBP - axleVppProfitGBP) / days.length, 2)
       : 0;
     const daysInMonth = getDaysInLondonMonth(monthStart);
-    const forecastCostGBP = round(averageDailyCostGBP * daysInMonth, 2);
+    // Forecast is a projection of electricity spend specifically - net off
+    // solar export (part of the same electricity account), but not Axle VPP
+    // profit, which is a separate, unrelated income stream.
+    const averageDailyCostGBPExclAxle = days.length
+      ? round((totalCostPence / 100 - totalExportProfitGBP) / days.length, 2)
+      : 0;
+    const forecastCostGBP = round(averageDailyCostGBPExclAxle * daysInMonth, 2);
 
     return json({
       accountNumber: breakdown.accountNumber,
