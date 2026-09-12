@@ -144,17 +144,25 @@ export async function computeHistory(env) {
     }
 
     // Which tariff(s) were active each month, since some months may differ.
+    // Look up each distinct product's real display name from Octopus rather
+    // than showing raw codes like "E-1R-IOG-SMB-FIX-12M-26-04-18-A".
     const allTariffSegments = [
       ...(breakdown.debug.tariffSegments || []),
       ...(breakdown.debug.export?.tariffSegments || []),
     ];
+    const authHeader = "Basic " + btoa(`${apiKey}:`);
+    const uniqueProductCodes = [...new Set(allTariffSegments.map((s) => s.productCode).filter(Boolean))];
+    const displayNames = await fetchProductDisplayNames(uniqueProductCodes, authHeader);
+
     for (const key of monthKeys) {
       const { start, end } = monthKeyToLondonRange(key);
       const effectiveEnd = minDate(end, rangeEnd);
       const overlapping = allTariffSegments.filter(
         (s) => new Date(s.segStart) < effectiveEnd && new Date(s.segEnd) > start
       );
-      monthTotals.get(key).tariffCodes = [...new Set(overlapping.map((s) => s.tariffCode))];
+      monthTotals.get(key).tariffs = [
+        ...new Set(overlapping.map((s) => displayNames.get(s.productCode) || s.tariffCode)),
+      ];
     }
 
     const months = monthKeys.map((key) => {
@@ -170,7 +178,7 @@ export async function computeHistory(env) {
         netCostGBP: round(e.costGBP - e.exportProfitGBP, 2),
         daysWithData: e.daysWithData,
         estimatedDays: e.estimatedDays,
-        tariffCodes: e.tariffCodes,
+        tariffs: e.tariffs,
       };
     });
 
@@ -669,6 +677,22 @@ function lookupRate(slotInstant, kwh, rateContext, dispatchWindows, evThresholdK
     ? dayNightSeg.nightRates
     : dayNightSeg.dayRates;
   return findActiveRate(rates, slotInstant);
+}
+
+// Maps product code -> Octopus's own friendly display name (e.g.
+// "IOG-SMB-FIX-12M-26-04-18" -> "Intelligent Octopus Go 12M Fixed"), falling
+// back to null (caller substitutes the raw tariff code) if the lookup fails.
+async function fetchProductDisplayNames(productCodes, authHeader) {
+  const map = new Map();
+  await Promise.all(
+    productCodes.map(async (code) => {
+      const product = await octopusGet(`${OCTOPUS_BASE}/products/${code}/`, authHeader).catch(
+        () => null
+      );
+      map.set(code, product?.display_name ?? null);
+    })
+  );
+  return map;
 }
 
 // Fetches the account's actual smart-charge dispatch history via Octopus's

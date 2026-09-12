@@ -282,7 +282,7 @@ function renderHistoryTable(months) {
   tbody.innerHTML = "";
   for (const month of [...months].reverse()) {
     const tr = document.createElement("tr");
-    const tariffLabel = month.tariffCodes?.length ? month.tariffCodes.join(", ") : "&mdash;";
+    const tariffLabel = month.tariffs?.length ? month.tariffs.join(", ") : "&mdash;";
     tr.innerHTML = `
       <td>${monthFormatter.format(new Date(month.month + "-01T00:00:00"))}</td>
       <td>${month.daysWithData ? month.kwh.toFixed(1) : "&mdash;"}</td>
