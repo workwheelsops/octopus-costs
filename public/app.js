@@ -79,6 +79,13 @@ function renderRateDebug(data, estimatedDays) {
       if (s.rateRecordCount != null) bits.push(`${s.rateRecordCount} rate records`);
       if (s.standingChargeError) bits.push(`standing charge fetch error: ${s.standingChargeError}`);
       let line = bits.join(", ");
+      if (s.product) {
+        line += s.product.error
+          ? `<br>&nbsp;&nbsp;product lookup error: ${s.product.error}`
+          : `<br>&nbsp;&nbsp;product: "${s.product.fullName ?? s.product.displayName ?? "?"}", ` +
+            `business: ${s.product.isBusiness}, variable: ${s.product.isVariable}, ` +
+            `available ${s.product.availableFrom ?? "?"} → ${s.product.availableTo ?? "ongoing"}`;
+      }
       if (s.rateProbeError) {
         line += `<br>&nbsp;&nbsp;probe error: ${s.rateProbeError}`;
       } else if (s.rateProbe) {
@@ -90,6 +97,13 @@ function renderRateDebug(data, estimatedDays) {
                 .map((r) => `${r.valid_from}→${r.valid_to} @ ${r.value_inc_vat}p`)
                 .join("; ")
             : "");
+      }
+      for (const key of ["day_unit_rates", "night_unit_rates"]) {
+        if (s[key]) {
+          line += s[key].error
+            ? `<br>&nbsp;&nbsp;${key} error: ${s[key].error}`
+            : `<br>&nbsp;&nbsp;${key}: ${s[key].totalCountEver ?? "?"} record(s) exist in total`;
+        }
       }
       return line;
     })

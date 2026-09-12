@@ -110,6 +110,21 @@ export async function computeCosts(env) {
         continue;
       }
 
+      const product = await octopusGet(`${OCTOPUS_BASE}/products/${productCode}/`, authHeader).catch(
+        (e) => ({ error: e.message })
+      );
+      segmentDebug.product = product?.error
+        ? { error: product.error }
+        : {
+            fullName: product.full_name,
+            displayName: product.display_name,
+            isVariable: product.is_variable,
+            isBusiness: product.is_business,
+            direction: product.direction,
+            availableFrom: product.available_from,
+            availableTo: product.available_to,
+          };
+
       try {
         const rates = await fetchAllPages(
           `${OCTOPUS_BASE}/products/${productCode}/electricity-tariffs/${tariffCode}/standard-unit-rates/` +
@@ -138,6 +153,18 @@ export async function computeCosts(env) {
                 value_inc_vat: r.value_inc_vat,
               })),
             };
+          }
+
+          // Some dual-rate tariffs expose rates via day/night endpoints
+          // instead of (or as well as) standard-unit-rates.
+          for (const kind of ["day-unit-rates", "night-unit-rates"]) {
+            const altProbe = await octopusGet(
+              `${OCTOPUS_BASE}/products/${productCode}/electricity-tariffs/${tariffCode}/${kind}/?page_size=3`,
+              authHeader
+            ).catch((e) => ({ error: e.message }));
+            segmentDebug[kind.replace(/-/g, "_")] = altProbe?.error
+              ? { error: altProbe.error }
+              : { totalCountEver: altProbe?.count ?? null, sample: altProbe?.results?.slice(0, 2) };
           }
         }
       } catch (err) {
