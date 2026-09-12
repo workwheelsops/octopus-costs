@@ -4,10 +4,10 @@
   "version": "1.0.0",
   "description": "Dashboard for daily and monthly Octopus Energy electricity costs, deployed to Cloudflare Pages.",
   "scripts": {
-    "dev": "wrangler pages dev . --compatibility-date=2024-09-01",
-    "deploy": "wrangler pages deploy .",
-    "secret:key": "wrangler pages secret put OCTOPUS_API_KEY",
-    "secret:account": "wrangler pages secret put OCTOPUS_ACCOUNT_NUMBER"
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "secret:key": "wrangler secret put OCTOPUS_API_KEY",
+    "secret:account": "wrangler secret put OCTOPUS_ACCOUNT_NUMBER"
   },
   "devDependencies": {
     "wrangler": "^4.0.0"

@@ -1,5 +1,3 @@
-// Cloudflare Pages Function: GET /api/costs
-//
 // Computes daily and month-to-date electricity cost for the current calendar
 // month (Europe/London), by combining half-hourly consumption with the
 // half-hourly unit rates and standing charges that were in force at the time.
@@ -8,8 +6,7 @@
 
 const OCTOPUS_BASE = "https://api.octopus.energy/v1";
 
-export async function onRequestGet(context) {
-  const { env } = context;
+export async function computeCosts(env) {
   const apiKey = env.OCTOPUS_API_KEY;
   const accountNumber = env.OCTOPUS_ACCOUNT_NUMBER;
 
@@ -18,7 +15,7 @@ export async function onRequestGet(context) {
       {
         error: "not_configured",
         message:
-          "Missing OCTOPUS_API_KEY and/or OCTOPUS_ACCOUNT_NUMBER. Set them as Cloudflare Pages secrets (see README).",
+          "Missing OCTOPUS_API_KEY and/or OCTOPUS_ACCOUNT_NUMBER. Set them as Worker secrets (see README).",
       },
       500
     );
