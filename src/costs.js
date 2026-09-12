@@ -127,11 +127,17 @@ export async function computeCosts(env) {
           authHeader
         );
 
+        let totalExportKwh = 0;
+        let slotsWithNoRate = 0;
         for (const slot of exportConsumption) {
           const kwh = slot.consumption;
+          totalExportKwh += kwh;
           const slotInstant = new Date(slot.interval_start);
           const rate = lookupRate(slot.interval_start, slotInstant, exportRateContext);
-          if (rate == null) continue;
+          if (rate == null) {
+            slotsWithNoRate++;
+            continue;
+          }
           const dateKey = londonDateKey(slotInstant);
           exportByDate.set(dateKey, (exportByDate.get(dateKey) || 0) + kwh * rate);
         }
@@ -140,6 +146,12 @@ export async function computeCosts(env) {
           mpan: exportMpan,
           meterSerial: exportSerial,
           rawConsumptionRecordCount: exportConsumption.length,
+          totalExportKwh: round(totalExportKwh, 3),
+          slotsWithNoRate,
+          sampleReadings: exportConsumption.slice(0, 3).map((s) => ({
+            interval_start: s.interval_start,
+            consumption: s.consumption,
+          })),
           tariffSegments: exportRateContext.tariffSegments,
         };
       }
