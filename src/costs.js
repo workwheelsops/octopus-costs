@@ -43,17 +43,16 @@ export async function computeCosts(env) {
 
     const axleVppProfitGBP = getAxleVppProfitGBP(env, londonDateKey(monthStart).slice(0, 7));
 
+    // Average daily cost nets off solar export only, not Axle VPP profit.
     const averageDailyCostGBP = days.length
-      ? round((totalCostPence / 100 - totalExportProfitGBP - axleVppProfitGBP) / days.length, 2)
-      : 0;
-    const daysInMonth = getDaysInLondonMonth(monthStart);
-    // Forecast is a projection of electricity spend specifically - net off
-    // solar export (part of the same electricity account), but not Axle VPP
-    // profit, which is a separate, unrelated income stream.
-    const averageDailyCostGBPExclAxle = days.length
       ? round((totalCostPence / 100 - totalExportProfitGBP) / days.length, 2)
       : 0;
-    const forecastCostGBP = round(averageDailyCostGBPExclAxle * daysInMonth, 2);
+    const daysInMonth = getDaysInLondonMonth(monthStart);
+    // The forecast additionally nets off Axle VPP profit (assumes this
+    // month's income so far continues at the same daily rate for the rest
+    // of the month, same as the electricity side of the projection).
+    const axleVppProfitPerDay = days.length ? axleVppProfitGBP / days.length : 0;
+    const forecastCostGBP = round((averageDailyCostGBP - axleVppProfitPerDay) * daysInMonth, 2);
 
     return json({
       accountNumber: breakdown.accountNumber,
