@@ -82,6 +82,8 @@ async function main() {
   );
   document.getElementById("footer").hidden = false;
 
+  loadHistory();
+
   const estimatedDays = data.days.filter((d) => d.estimated).length;
   const dispatchIssue = data.debug?.dispatches?.error || data.debug?.dispatches?.errors;
   if (estimatedDays > 0 || data.debug?.dispatches) {
@@ -199,6 +201,70 @@ function renderTable(days, hasExport) {
       <td>${gbp.format(day.standingChargeGBP)}</td>
       <td>${gbp.format(day.costGBP)}${day.estimated ? " *" : ""}</td>
       ${hasExport ? `<td>${gbp.format(day.exportProfitGBP)}</td>` : ""}
+    `;
+    tbody.appendChild(tr);
+  }
+}
+
+const monthFormatter = new Intl.DateTimeFormat("en-GB", { month: "short", year: "numeric" });
+
+async function loadHistory() {
+  let data;
+  try {
+    const res = await fetch("/api/history");
+    data = await res.json();
+    if (!res.ok || !data.months) return;
+  } catch (err) {
+    return;
+  }
+
+  renderHistoryChart(data.months);
+  document.getElementById("history-chart-section").hidden = false;
+
+  renderHistoryTable(data.months);
+  document.getElementById("history-table-section").hidden = false;
+}
+
+function renderHistoryChart(months) {
+  const chart = document.getElementById("history-chart");
+  chart.innerHTML = "";
+  const maxCost = Math.max(...months.map((m) => m.netCostGBP), 0.01);
+
+  for (const month of months) {
+    const bar = document.createElement("div");
+    bar.className = "chart__bar";
+
+    const fill = document.createElement("div");
+    fill.className = "chart__bar-fill" + (month.daysWithData === 0 ? " is-estimated" : "");
+    const heightPct = Math.max((month.netCostGBP / maxCost) * 100, 1);
+    fill.style.height = `${heightPct}%`;
+    fill.title = `${monthFormatter.format(new Date(month.month + "-01T00:00:00"))}: ${gbp.format(
+      month.netCostGBP
+    )}`;
+
+    const label = document.createElement("span");
+    label.className = "chart__bar-label";
+    label.textContent = monthFormatter.format(new Date(month.month + "-01T00:00:00")).split(" ")[0];
+
+    bar.appendChild(fill);
+    bar.appendChild(label);
+    chart.appendChild(bar);
+  }
+}
+
+function renderHistoryTable(months) {
+  const tbody = document.querySelector("#history-table tbody");
+  tbody.innerHTML = "";
+  for (const month of [...months].reverse()) {
+    const tr = document.createElement("tr");
+    const tariffLabel = month.tariffCodes?.length ? month.tariffCodes.join(", ") : "&mdash;";
+    tr.innerHTML = `
+      <td>${monthFormatter.format(new Date(month.month + "-01T00:00:00"))}</td>
+      <td>${month.daysWithData ? month.kwh.toFixed(1) : "&mdash;"}</td>
+      <td>${month.daysWithData ? gbp.format(month.costGBP) : "&mdash;"}</td>
+      <td>${month.exportProfitGBP ? gbp.format(month.exportProfitGBP) : "&mdash;"}</td>
+      <td>${month.daysWithData ? gbp.format(month.netCostGBP) : "&mdash;"}</td>
+      <td><small>${tariffLabel}</small></td>
     `;
     tbody.appendChild(tr);
   }

@@ -1,8 +1,11 @@
-// Computes daily and month-to-date electricity cost for the current calendar
-// month (Europe/London), by combining half-hourly consumption with the
-// half-hourly unit rates and standing charges that were in force at the time.
-// Designed for Agile-style tariffs where the unit rate changes every 30
-// minutes, but also works for flat tariffs (the rate is just constant).
+// Computes daily electricity cost for a date range (Europe/London), by
+// combining half-hourly consumption with the half-hourly unit rates and
+// standing charges that were in force at the time. Designed for Agile-style
+// tariffs where the unit rate changes every 30 minutes, but also works for
+// flat/dual-rate tariffs. The core per-day computation is shared between the
+// current-month view (computeCosts) and the 12-month history view
+// (computeHistory), since a date range spanning tariff changes already works
+// correctly - agreements are matched by date overlap either way.
 
 const OCTOPUS_BASE = "https://api.octopus.energy/v1";
 const KRAKEN_GRAPHQL_URL = "https://api.octopus.energy/v1/graphql/";
@@ -22,238 +25,13 @@ export async function computeCosts(env) {
     );
   }
 
-  const authHeader = "Basic " + btoa(`${apiKey}:`);
+  const { monthStart, periodEnd } = getCurrentLondonMonthRange();
 
   try {
-    const account = await octopusGet(
-      `${OCTOPUS_BASE}/accounts/${encodeURIComponent(accountNumber)}/`,
-      authHeader
-    );
-
-    const properties = account.properties || [];
-    const property = properties.find((p) => !p.moved_out_at) || properties[0];
-    const meterPoints = property?.electricity_meter_points || [];
-    // Prefer the import meter point over an export one (e.g. solar export),
-    // since export meter points report energy sent out, not consumed. An
-    // explicit override is available in case a account has an unusual setup.
-    const meterPoint = env.OCTOPUS_MPAN
-      ? meterPoints.find((mp) => mp.mpan === env.OCTOPUS_MPAN)
-      : meterPoints.find((mp) => !mp.is_export) || meterPoints[0];
-    if (!meterPoint) {
-      return json(
-        {
-          error: "no_meter_point",
-          message: "No electricity meter point found on this account.",
-        },
-        404
-      );
-    }
-
-    const mpan = meterPoint.mpan;
-    const meters = meterPoint.meters || [];
-    // If a meter exchange has happened, several meters can be listed for the
-    // same meter point. Allow pinning the exact one via an env var; otherwise
-    // assume the last-listed meter is the current one (Octopus lists them in
-    // installation order).
-    const meter = env.OCTOPUS_METER_SERIAL
-      ? meters.find((m) => m.serial_number === env.OCTOPUS_METER_SERIAL) || {
-          serial_number: env.OCTOPUS_METER_SERIAL,
-        }
-      : meters[meters.length - 1];
-    if (!meter) {
-      return json(
-        { error: "no_meter", message: "No meter found on the electricity meter point." },
-        404
-      );
-    }
-    const serial = meter.serial_number;
-    const agreements = meterPoint.agreements || [];
-
-    const { monthStart, periodEnd } = getCurrentLondonMonthRange();
-
-    const consumption = await fetchAllPages(
-      `${OCTOPUS_BASE}/electricity-meter-points/${mpan}/meters/${serial}/consumption/` +
-        `?period_from=${monthStart.toISOString()}&period_to=${periodEnd.toISOString()}` +
-        `&page_size=25000&order_by=period`,
-      authHeader
-    );
-
-    // If this month is empty, check whether the meter has ever reported any
-    // half-hourly data via the API at all (helps tell "meter isn't smart /
-    // hasn't shared data yet" apart from "just this month is missing").
-    let mostRecentReadingAt = null;
-    if (consumption.length === 0) {
-      const latest = await octopusGet(
-        `${OCTOPUS_BASE}/electricity-meter-points/${mpan}/meters/${serial}/consumption/` +
-          `?page_size=1&order_by=-period`,
-        authHeader
-      ).catch(() => null);
-      mostRecentReadingAt = latest?.results?.[0]?.interval_start ?? null;
-    }
-
-    const rateContext = await buildRateContext(agreements, monthStart, periodEnd, authHeader);
-    const { rateMap, dayNightSegments, standingSegments, tariffSegments } = rateContext;
-
-    // Intelligent Octopus Go's real off-peak eligibility isn't just the
-    // advertised 23:30-05:30 window: Octopus grants extra "smart charge"
-    // dispatch windows on top of it, which vary night to night. Fetch the
-    // account's actual completed dispatches via the (separate) GraphQL API
-    // so those bonus windows count as off-peak too.
-    const { dispatchWindows, dispatchDebug } = await fetchDispatchWindows(
-      apiKey,
-      accountNumber,
-      monthStart,
-      periodEnd
-    );
-
-    // Intelligent Octopus Go also bills any energy routed through the smart
-    // charging system at the off-peak rate regardless of clock time - both a
-    // session that overruns the guaranteed window to hit its target, and a
-    // manual daytime top-up. There's no clean API field for "this reading was
-    // EV-routed", so approximate it: a half-hour slot using unusually high
-    // power (well above normal appliance baseline) is assumed to be EV
-    // charging. Tune via OCTOPUS_EV_THRESHOLD_KWH if 2 kWh/slot (~4kW) is
-    // wrong for this household's charger/appliances.
-    const evThresholdKwh = env.OCTOPUS_EV_THRESHOLD_KWH
-      ? Number(env.OCTOPUS_EV_THRESHOLD_KWH)
-      : 2;
-
-    // Export: many solar accounts have a second, export-only meter point.
-    // Auto-detect it and price its consumption (= energy sent to the grid)
-    // the same way, to work out export earnings per day.
-    const exportMeterPoint = env.OCTOPUS_EXPORT_MPAN
-      ? meterPoints.find((mp) => mp.mpan === env.OCTOPUS_EXPORT_MPAN)
-      : meterPoints.find((mp) => mp.is_export);
-    const exportByDate = new Map(); // londonDateKey -> profitPence
-    let exportDebug = null;
-
-    if (exportMeterPoint) {
-      const exportMeters = exportMeterPoint.meters || [];
-      const exportMeter = env.OCTOPUS_EXPORT_METER_SERIAL
-        ? exportMeters.find((m) => m.serial_number === env.OCTOPUS_EXPORT_METER_SERIAL) || {
-            serial_number: env.OCTOPUS_EXPORT_METER_SERIAL,
-          }
-        : exportMeters[exportMeters.length - 1];
-
-      if (exportMeter) {
-        const exportMpan = exportMeterPoint.mpan;
-        const exportSerial = exportMeter.serial_number;
-        const exportConsumption = await fetchAllPages(
-          `${OCTOPUS_BASE}/electricity-meter-points/${exportMpan}/meters/${exportSerial}/consumption/` +
-            `?period_from=${monthStart.toISOString()}&period_to=${periodEnd.toISOString()}` +
-            `&page_size=25000&order_by=period`,
-          authHeader
-        ).catch(() => []);
-
-        const exportRateContext = await buildRateContext(
-          exportMeterPoint.agreements || [],
-          monthStart,
-          periodEnd,
-          authHeader
-        );
-
-        let totalExportKwh = 0;
-        let slotsWithNoRate = 0;
-        for (const slot of exportConsumption) {
-          const kwh = slot.consumption;
-          totalExportKwh += kwh;
-          const slotInstant = new Date(slot.interval_start);
-          const rate = lookupRate(slotInstant, kwh, exportRateContext, dispatchWindows, evThresholdKwh);
-          if (rate == null) {
-            slotsWithNoRate++;
-            continue;
-          }
-          const dateKey = londonDateKey(slotInstant);
-          exportByDate.set(dateKey, (exportByDate.get(dateKey) || 0) + kwh * rate);
-        }
-
-        exportDebug = {
-          mpan: exportMpan,
-          meterSerial: exportSerial,
-          rawConsumptionRecordCount: exportConsumption.length,
-          totalExportKwh: round(totalExportKwh, 3),
-          slotsWithNoRate,
-          sampleReadings: exportConsumption.slice(0, 3).map((s) => ({
-            interval_start: s.interval_start,
-            consumption: s.consumption,
-          })),
-          tariffSegments: exportRateContext.tariffSegments,
-        };
-      }
-    }
-
-    const dayMap = new Map(); // londonDateKey -> { kwh, costPence, missingRate }
-    // Debug: kWh summed per half-hour-of-day bucket (London local), across all
-    // days, so a boundary/classification bug shows up as a spike right at the
-    // 23:30 or 05:30 edge rather than being spread evenly through the day.
-    const hourBuckets = Array.from({ length: 48 }, () => ({ kwh: 0, offPeak: null }));
-    let evThresholdReclassifiedKwh = 0;
-    let evThresholdReclassifiedSlots = 0;
-
-    for (const slot of consumption) {
-      const kwh = slot.consumption;
-      const slotInstant = new Date(slot.interval_start);
-      const standardOffPeak = isStandardOffPeakWindow(slotInstant);
-      const offPeak = isOffPeak(slotInstant, kwh, dispatchWindows, evThresholdKwh);
-      if (offPeak && !standardOffPeak && kwh >= evThresholdKwh) {
-        evThresholdReclassifiedKwh += kwh;
-        evThresholdReclassifiedSlots++;
-      }
-      const rate = lookupRate(slotInstant, kwh, rateContext, dispatchWindows, evThresholdKwh);
-      const dateKey = londonDateKey(slotInstant);
-
-      const londonMinutes = getLondonMinutesOfDay(slotInstant);
-      const bucketIndex = Math.floor(londonMinutes / 30);
-      hourBuckets[bucketIndex].kwh += kwh;
-      hourBuckets[bucketIndex].offPeak = offPeak;
-      const entry =
-        dayMap.get(dateKey) ||
-        {
-          kwh: 0,
-          costPence: 0,
-          missingRate: false,
-          offPeakKwh: 0,
-          offPeakCostPence: 0,
-          onPeakKwh: 0,
-          onPeakCostPence: 0,
-        };
-      entry.kwh += kwh;
-      if (offPeak) entry.offPeakKwh += kwh;
-      else entry.onPeakKwh += kwh;
-      if (rate != null) {
-        const cost = kwh * rate;
-        entry.costPence += cost;
-        if (offPeak) entry.offPeakCostPence += cost;
-        else entry.onPeakCostPence += cost;
-      } else {
-        entry.missingRate = true;
-      }
-      dayMap.set(dateKey, entry);
-    }
-
-    for (const [dateKey, entry] of dayMap) {
-      const dayStartUTC = londonDateKeyToUTC(dateKey);
-      const standingChargePence = findStandingCharge(standingSegments, dayStartUTC);
-      entry.standingChargePence = standingChargePence ?? 0;
-      entry.costPence += entry.standingChargePence;
-      if (standingChargePence == null) entry.missingRate = true;
-      entry.exportProfitPence = exportByDate.get(dateKey) ?? 0;
-    }
-
-    const days = [...dayMap.entries()]
-      .sort(([a], [b]) => (a < b ? -1 : 1))
-      .map(([date, e]) => ({
-        date,
-        kwh: round(e.kwh, 3),
-        standingChargeGBP: round(e.standingChargePence / 100, 2),
-        costGBP: round(e.costPence / 100, 2),
-        offPeakKwh: round(e.offPeakKwh, 3),
-        offPeakCostGBP: round(e.offPeakCostPence / 100, 2),
-        onPeakKwh: round(e.onPeakKwh, 3),
-        onPeakCostGBP: round(e.onPeakCostPence / 100, 2),
-        exportProfitGBP: round(e.exportProfitPence / 100, 2),
-        estimated: e.missingRate,
-      }));
+    const breakdown = await computeDailyBreakdown(env, monthStart, periodEnd, {
+      includeProductMeta: true,
+    });
+    const { days } = breakdown;
 
     const totalCostPence = days.reduce((sum, d) => sum + d.costGBP * 100, 0);
     const totalKwh = days.reduce((sum, d) => sum + d.kwh, 0);
@@ -262,9 +40,6 @@ export async function computeCosts(env) {
     const totalOffPeakKwh = round(days.reduce((sum, d) => sum + d.offPeakKwh, 0), 2);
     const totalOnPeakKwh = round(days.reduce((sum, d) => sum + d.onPeakKwh, 0), 2);
     const totalExportProfitGBP = round(days.reduce((sum, d) => sum + d.exportProfitGBP, 0), 2);
-
-    const sampleSlot = consumption[0];
-    const sampleRateKeys = [...rateMap.keys()].slice(0, 3).map((t) => new Date(t).toISOString());
 
     // Axle Energy's VPP earnings aren't available via a personal API token
     // (only a partner/business-level "organisational token" can reach their
@@ -279,9 +54,9 @@ export async function computeCosts(env) {
     const forecastCostGBP = round(averageDailyCostGBP * daysInMonth, 2);
 
     return json({
-      accountNumber,
-      mpan,
-      meterSerial: serial,
+      accountNumber: breakdown.accountNumber,
+      mpan: breakdown.mpan,
+      meterSerial: breakdown.meterSerial,
       days,
       totalCostGBP: round(totalCostPence / 100, 2),
       totalKwh: round(totalKwh, 2),
@@ -296,33 +71,10 @@ export async function computeCosts(env) {
       forecastCostGBP,
       monthStart: monthStart.toISOString(),
       generatedAt: new Date().toISOString(),
-      debug: {
-        propertyCount: properties.length,
-        meterPointCount: meterPoints.length,
-        meterPointMpans: meterPoints.map((mp) => ({ mpan: mp.mpan, isExport: !!mp.is_export })),
-        metersOnThisMeterPoint: meters.map((m) => m.serial_number),
-        agreementCount: agreements.length,
-        periodFrom: monthStart.toISOString(),
-        periodTo: periodEnd.toISOString(),
-        rawConsumptionRecordCount: consumption.length,
-        mostRecentReadingAt,
-        tariffSegments,
-        rateMapSize: rateMap.size,
-        sampleConsumptionIntervalStart: sampleSlot?.interval_start ?? null,
-        sampleRateKeys,
-        export: exportDebug,
-        dispatches: dispatchDebug,
-        evThresholdKwh,
-        evThresholdReclassifiedKwh: round(evThresholdReclassifiedKwh, 3),
-        evThresholdReclassifiedSlots,
-        hourBuckets: hourBuckets.map((b, i) => ({
-          time: `${String(Math.floor((i * 30) / 60)).padStart(2, "0")}:${String((i * 30) % 60).padStart(2, "0")}`,
-          kwh: round(b.kwh, 3),
-          offPeak: b.offPeak,
-        })),
-      },
+      debug: breakdown.debug,
     });
   } catch (err) {
+    if (err.responseBody) return json(err.responseBody, err.status);
     return json(
       { error: "upstream_error", message: err.message || String(err) },
       err.status || 502
@@ -330,12 +82,404 @@ export async function computeCosts(env) {
   }
 }
 
+// Totals for each of the last 12 calendar months (Europe/London), including
+// the current partial month. Reuses the exact same per-day pricing logic as
+// computeCosts, just over a wider range and grouped by month afterwards -
+// months on different tariffs are handled automatically since agreements are
+// already matched by date overlap, not assumed to be constant.
+export async function computeHistory(env) {
+  const apiKey = env.OCTOPUS_API_KEY;
+  const accountNumber = env.OCTOPUS_ACCOUNT_NUMBER;
+
+  if (!apiKey || !accountNumber) {
+    return json(
+      {
+        error: "not_configured",
+        message:
+          "Missing OCTOPUS_API_KEY and/or OCTOPUS_ACCOUNT_NUMBER. Set them as Worker secrets (see README).",
+      },
+      500
+    );
+  }
+
+  const monthKeys = getLast12MonthKeys();
+  const rangeStart = monthKeyToLondonRange(monthKeys[0]).start;
+  const { periodEnd: rangeEnd } = getCurrentLondonMonthRange();
+
+  try {
+    // Skip per-agreement product-metadata lookups here: a year can span many
+    // more tariff changes than a single month, and each extra lookup is an
+    // extra outbound request - not worth it for a summary view.
+    const breakdown = await computeDailyBreakdown(env, rangeStart, rangeEnd, {
+      includeProductMeta: false,
+    });
+    const { days } = breakdown;
+
+    const monthTotals = new Map();
+    for (const key of monthKeys) {
+      monthTotals.set(key, {
+        kwh: 0,
+        costGBP: 0,
+        offPeakCostGBP: 0,
+        onPeakCostGBP: 0,
+        standingChargeGBP: 0,
+        exportProfitGBP: 0,
+        daysWithData: 0,
+        estimatedDays: 0,
+      });
+    }
+    for (const d of days) {
+      const entry = monthTotals.get(d.date.slice(0, 7));
+      if (!entry) continue;
+      entry.kwh += d.kwh;
+      entry.costGBP += d.costGBP;
+      entry.offPeakCostGBP += d.offPeakCostGBP;
+      entry.onPeakCostGBP += d.onPeakCostGBP;
+      entry.standingChargeGBP += d.standingChargeGBP;
+      entry.exportProfitGBP += d.exportProfitGBP;
+      entry.daysWithData++;
+      if (d.estimated) entry.estimatedDays++;
+    }
+
+    // Which tariff(s) were active each month, since some months may differ.
+    const allTariffSegments = [
+      ...(breakdown.debug.tariffSegments || []),
+      ...(breakdown.debug.export?.tariffSegments || []),
+    ];
+    for (const key of monthKeys) {
+      const { start, end } = monthKeyToLondonRange(key);
+      const effectiveEnd = minDate(end, rangeEnd);
+      const overlapping = allTariffSegments.filter(
+        (s) => new Date(s.segStart) < effectiveEnd && new Date(s.segEnd) > start
+      );
+      monthTotals.get(key).tariffCodes = [...new Set(overlapping.map((s) => s.tariffCode))];
+    }
+
+    const months = monthKeys.map((key) => {
+      const e = monthTotals.get(key);
+      return {
+        month: key,
+        kwh: round(e.kwh, 2),
+        costGBP: round(e.costGBP, 2),
+        offPeakCostGBP: round(e.offPeakCostGBP, 2),
+        onPeakCostGBP: round(e.onPeakCostGBP, 2),
+        standingChargeGBP: round(e.standingChargeGBP, 2),
+        exportProfitGBP: round(e.exportProfitGBP, 2),
+        netCostGBP: round(e.costGBP - e.exportProfitGBP, 2),
+        daysWithData: e.daysWithData,
+        estimatedDays: e.estimatedDays,
+        tariffCodes: e.tariffCodes,
+      };
+    });
+
+    return json({
+      accountNumber: breakdown.accountNumber,
+      mpan: breakdown.mpan,
+      meterSerial: breakdown.meterSerial,
+      months,
+      periodFrom: rangeStart.toISOString(),
+      periodTo: rangeEnd.toISOString(),
+      generatedAt: new Date().toISOString(),
+      debug: breakdown.debug,
+    });
+  } catch (err) {
+    if (err.responseBody) return json(err.responseBody, err.status);
+    return json(
+      { error: "upstream_error", message: err.message || String(err) },
+      err.status || 502
+    );
+  }
+}
+
+// Shared core: fetches the account, resolves the import (and export) meter,
+// prices every consumption slot in [rangeStart, rangeEnd), and returns a
+// per-day breakdown. Throws an error carrying .responseBody/.status for
+// structured API errors (e.g. no meter found); callers translate that to a
+// JSON response.
+async function computeDailyBreakdown(env, rangeStart, rangeEnd, { includeProductMeta = true } = {}) {
+  const apiKey = env.OCTOPUS_API_KEY;
+  const accountNumber = env.OCTOPUS_ACCOUNT_NUMBER;
+  const authHeader = "Basic " + btoa(`${apiKey}:`);
+
+  const account = await octopusGet(
+    `${OCTOPUS_BASE}/accounts/${encodeURIComponent(accountNumber)}/`,
+    authHeader
+  );
+
+  const properties = account.properties || [];
+  const property = properties.find((p) => !p.moved_out_at) || properties[0];
+  const meterPoints = property?.electricity_meter_points || [];
+  // Prefer the import meter point over an export one (e.g. solar export),
+  // since export meter points report energy sent out, not consumed. An
+  // explicit override is available in case a account has an unusual setup.
+  const meterPoint = env.OCTOPUS_MPAN
+    ? meterPoints.find((mp) => mp.mpan === env.OCTOPUS_MPAN)
+    : meterPoints.find((mp) => !mp.is_export) || meterPoints[0];
+  if (!meterPoint) {
+    throw apiError({ error: "no_meter_point", message: "No electricity meter point found on this account." }, 404);
+  }
+
+  const mpan = meterPoint.mpan;
+  const meters = meterPoint.meters || [];
+  // If a meter exchange has happened, several meters can be listed for the
+  // same meter point. Allow pinning the exact one via an env var; otherwise
+  // assume the last-listed meter is the current one (Octopus lists them in
+  // installation order).
+  const meter = env.OCTOPUS_METER_SERIAL
+    ? meters.find((m) => m.serial_number === env.OCTOPUS_METER_SERIAL) || {
+        serial_number: env.OCTOPUS_METER_SERIAL,
+      }
+    : meters[meters.length - 1];
+  if (!meter) {
+    throw apiError({ error: "no_meter", message: "No meter found on the electricity meter point." }, 404);
+  }
+  const serial = meter.serial_number;
+  const agreements = meterPoint.agreements || [];
+
+  const consumption = await fetchAllPages(
+    `${OCTOPUS_BASE}/electricity-meter-points/${mpan}/meters/${serial}/consumption/` +
+      `?period_from=${rangeStart.toISOString()}&period_to=${rangeEnd.toISOString()}` +
+      `&page_size=25000&order_by=period`,
+    authHeader
+  );
+
+  // If this range is empty, check whether the meter has ever reported any
+  // half-hourly data via the API at all (helps tell "meter isn't smart /
+  // hasn't shared data yet" apart from "just this range is missing").
+  let mostRecentReadingAt = null;
+  if (consumption.length === 0) {
+    const latest = await octopusGet(
+      `${OCTOPUS_BASE}/electricity-meter-points/${mpan}/meters/${serial}/consumption/` +
+        `?page_size=1&order_by=-period`,
+      authHeader
+    ).catch(() => null);
+    mostRecentReadingAt = latest?.results?.[0]?.interval_start ?? null;
+  }
+
+  const rateContext = await buildRateContext(agreements, rangeStart, rangeEnd, authHeader, {
+    includeProductMeta,
+  });
+  const { rateMap, standingSegments, tariffSegments } = rateContext;
+
+  // Intelligent Octopus Go's real off-peak eligibility isn't just the
+  // advertised 23:30-05:30 window: Octopus grants extra "smart charge"
+  // dispatch windows on top of it, which vary night to night. Fetch the
+  // account's actual completed dispatches via the (separate) GraphQL API
+  // so those bonus windows count as off-peak too.
+  const { dispatchWindows, dispatchDebug } = await fetchDispatchWindows(
+    apiKey,
+    accountNumber,
+    rangeStart,
+    rangeEnd
+  );
+
+  // Intelligent Octopus Go also bills any energy routed through the smart
+  // charging system at the off-peak rate regardless of clock time - both a
+  // session that overruns the guaranteed window to hit its target, and a
+  // manual daytime top-up. There's no clean API field for "this reading was
+  // EV-routed", so approximate it: a half-hour slot using unusually high
+  // power (well above normal appliance baseline) is assumed to be EV
+  // charging. Tune via OCTOPUS_EV_THRESHOLD_KWH if 2 kWh/slot (~4kW) is
+  // wrong for this household's charger/appliances.
+  const evThresholdKwh = env.OCTOPUS_EV_THRESHOLD_KWH ? Number(env.OCTOPUS_EV_THRESHOLD_KWH) : 2;
+
+  // Export: many solar accounts have a second, export-only meter point.
+  // Auto-detect it and price its consumption (= energy sent to the grid)
+  // the same way, to work out export earnings per day.
+  const exportMeterPoint = env.OCTOPUS_EXPORT_MPAN
+    ? meterPoints.find((mp) => mp.mpan === env.OCTOPUS_EXPORT_MPAN)
+    : meterPoints.find((mp) => mp.is_export);
+  const exportByDate = new Map(); // londonDateKey -> profitPence
+  let exportDebug = null;
+
+  if (exportMeterPoint) {
+    const exportMeters = exportMeterPoint.meters || [];
+    const exportMeter = env.OCTOPUS_EXPORT_METER_SERIAL
+      ? exportMeters.find((m) => m.serial_number === env.OCTOPUS_EXPORT_METER_SERIAL) || {
+          serial_number: env.OCTOPUS_EXPORT_METER_SERIAL,
+        }
+      : exportMeters[exportMeters.length - 1];
+
+    if (exportMeter) {
+      const exportMpan = exportMeterPoint.mpan;
+      const exportSerial = exportMeter.serial_number;
+      const exportConsumption = await fetchAllPages(
+        `${OCTOPUS_BASE}/electricity-meter-points/${exportMpan}/meters/${exportSerial}/consumption/` +
+          `?period_from=${rangeStart.toISOString()}&period_to=${rangeEnd.toISOString()}` +
+          `&page_size=25000&order_by=period`,
+        authHeader
+      ).catch(() => []);
+
+      const exportRateContext = await buildRateContext(
+        exportMeterPoint.agreements || [],
+        rangeStart,
+        rangeEnd,
+        authHeader,
+        { includeProductMeta }
+      );
+
+      let totalExportKwh = 0;
+      let slotsWithNoRate = 0;
+      for (const slot of exportConsumption) {
+        const kwh = slot.consumption;
+        totalExportKwh += kwh;
+        const slotInstant = new Date(slot.interval_start);
+        const rate = lookupRate(slotInstant, kwh, exportRateContext, dispatchWindows, evThresholdKwh);
+        if (rate == null) {
+          slotsWithNoRate++;
+          continue;
+        }
+        const dateKey = londonDateKey(slotInstant);
+        exportByDate.set(dateKey, (exportByDate.get(dateKey) || 0) + kwh * rate);
+      }
+
+      exportDebug = {
+        mpan: exportMpan,
+        meterSerial: exportSerial,
+        rawConsumptionRecordCount: exportConsumption.length,
+        totalExportKwh: round(totalExportKwh, 3),
+        slotsWithNoRate,
+        sampleReadings: exportConsumption.slice(0, 3).map((s) => ({
+          interval_start: s.interval_start,
+          consumption: s.consumption,
+        })),
+        tariffSegments: exportRateContext.tariffSegments,
+      };
+    }
+  }
+
+  const dayMap = new Map(); // londonDateKey -> { kwh, costPence, missingRate }
+  // Debug: kWh summed per half-hour-of-day bucket (London local), across the
+  // whole range, so a boundary/classification bug shows up as a spike right
+  // at the 23:30 or 05:30 edge rather than being spread evenly through the
+  // day.
+  const hourBuckets = Array.from({ length: 48 }, () => ({ kwh: 0, offPeak: null }));
+  let evThresholdReclassifiedKwh = 0;
+  let evThresholdReclassifiedSlots = 0;
+
+  for (const slot of consumption) {
+    const kwh = slot.consumption;
+    const slotInstant = new Date(slot.interval_start);
+    const standardOffPeak = isStandardOffPeakWindow(slotInstant);
+    const offPeak = isOffPeak(slotInstant, kwh, dispatchWindows, evThresholdKwh);
+    if (offPeak && !standardOffPeak && kwh >= evThresholdKwh) {
+      evThresholdReclassifiedKwh += kwh;
+      evThresholdReclassifiedSlots++;
+    }
+    const rate = lookupRate(slotInstant, kwh, rateContext, dispatchWindows, evThresholdKwh);
+    const dateKey = londonDateKey(slotInstant);
+
+    const londonMinutes = getLondonMinutesOfDay(slotInstant);
+    const bucketIndex = Math.floor(londonMinutes / 30);
+    hourBuckets[bucketIndex].kwh += kwh;
+    hourBuckets[bucketIndex].offPeak = offPeak;
+    const entry =
+      dayMap.get(dateKey) ||
+      {
+        kwh: 0,
+        costPence: 0,
+        missingRate: false,
+        offPeakKwh: 0,
+        offPeakCostPence: 0,
+        onPeakKwh: 0,
+        onPeakCostPence: 0,
+      };
+    entry.kwh += kwh;
+    if (offPeak) entry.offPeakKwh += kwh;
+    else entry.onPeakKwh += kwh;
+    if (rate != null) {
+      const cost = kwh * rate;
+      entry.costPence += cost;
+      if (offPeak) entry.offPeakCostPence += cost;
+      else entry.onPeakCostPence += cost;
+    } else {
+      entry.missingRate = true;
+    }
+    dayMap.set(dateKey, entry);
+  }
+
+  for (const [dateKey, entry] of dayMap) {
+    const dayStartUTC = londonDateKeyToUTC(dateKey);
+    const standingChargePence = findStandingCharge(standingSegments, dayStartUTC);
+    entry.standingChargePence = standingChargePence ?? 0;
+    entry.costPence += entry.standingChargePence;
+    if (standingChargePence == null) entry.missingRate = true;
+    entry.exportProfitPence = exportByDate.get(dateKey) ?? 0;
+  }
+
+  const days = [...dayMap.entries()]
+    .sort(([a], [b]) => (a < b ? -1 : 1))
+    .map(([date, e]) => ({
+      date,
+      kwh: round(e.kwh, 3),
+      standingChargeGBP: round(e.standingChargePence / 100, 2),
+      costGBP: round(e.costPence / 100, 2),
+      offPeakKwh: round(e.offPeakKwh, 3),
+      offPeakCostGBP: round(e.offPeakCostPence / 100, 2),
+      onPeakKwh: round(e.onPeakKwh, 3),
+      onPeakCostGBP: round(e.onPeakCostPence / 100, 2),
+      exportProfitGBP: round(e.exportProfitPence / 100, 2),
+      estimated: e.missingRate,
+    }));
+
+  const sampleSlot = consumption[0];
+  const sampleRateKeys = [...rateMap.keys()].slice(0, 3).map((t) => new Date(t).toISOString());
+
+  return {
+    accountNumber,
+    mpan,
+    meterSerial: serial,
+    days,
+    debug: {
+      propertyCount: properties.length,
+      meterPointCount: meterPoints.length,
+      meterPointMpans: meterPoints.map((mp) => ({ mpan: mp.mpan, isExport: !!mp.is_export })),
+      metersOnThisMeterPoint: meters.map((m) => m.serial_number),
+      agreementCount: agreements.length,
+      periodFrom: rangeStart.toISOString(),
+      periodTo: rangeEnd.toISOString(),
+      rawConsumptionRecordCount: consumption.length,
+      mostRecentReadingAt,
+      tariffSegments,
+      rateMapSize: rateMap.size,
+      sampleConsumptionIntervalStart: sampleSlot?.interval_start ?? null,
+      sampleRateKeys,
+      export: exportDebug,
+      dispatches: dispatchDebug,
+      evThresholdKwh,
+      evThresholdReclassifiedKwh: round(evThresholdReclassifiedKwh, 3),
+      evThresholdReclassifiedSlots,
+      hourBuckets: hourBuckets.map((b, i) => ({
+        time: `${String(Math.floor((i * 30) / 60)).padStart(2, "0")}:${String((i * 30) % 60).padStart(2, "0")}`,
+        kwh: round(b.kwh, 3),
+        offPeak: b.offPeak,
+      })),
+    },
+  };
+}
+
+function apiError(body, status) {
+  const err = new Error(body.message || body.error);
+  err.responseBody = body;
+  err.status = status;
+  return err;
+}
+
 // Builds a rate lookup for a set of agreements (from one meter point) over
-// [monthStart, periodEnd]: a half-hourly rateMap for tariffs that publish
+// [rangeStart, rangeEnd]: a half-hourly rateMap for tariffs that publish
 // standard-unit-rates, plus dayNightSegments as a fallback for tariffs that
 // only publish flat day/night rates (e.g. Intelligent Octopus Go), plus
 // standingSegments (irrelevant for export meter points, but harmless).
-async function buildRateContext(agreements, monthStart, periodEnd, authHeader) {
+// includeProductMeta adds one extra lookup per agreement purely for
+// diagnostics - skip it for wide ranges with many tariff changes to keep the
+// outbound request count down.
+async function buildRateContext(
+  agreements,
+  rangeStart,
+  rangeEnd,
+  authHeader,
+  { includeProductMeta = true } = {}
+) {
   const rateMap = new Map(); // instant (ms since epoch) -> value_inc_vat (pence)
   const standingSegments = []; // { segStart, segEnd, charges: [...] }
   const dayNightSegments = []; // { segStart, segEnd, dayRates: [...], nightRates: [...] }
@@ -343,9 +487,9 @@ async function buildRateContext(agreements, monthStart, periodEnd, authHeader) {
 
   for (const agreement of agreements) {
     const validFrom = new Date(agreement.valid_from);
-    const validTo = agreement.valid_to ? new Date(agreement.valid_to) : periodEnd;
-    const segStart = maxDate(validFrom, monthStart);
-    const segEnd = minDate(validTo, periodEnd);
+    const validTo = agreement.valid_to ? new Date(agreement.valid_to) : rangeEnd;
+    const segStart = maxDate(validFrom, rangeStart);
+    const segEnd = minDate(validTo, rangeEnd);
     if (segStart >= segEnd) continue;
 
     const tariffCode = agreement.tariff_code;
@@ -357,20 +501,22 @@ async function buildRateContext(agreements, monthStart, periodEnd, authHeader) {
       continue;
     }
 
-    const product = await octopusGet(`${OCTOPUS_BASE}/products/${productCode}/`, authHeader).catch(
-      (e) => ({ error: e.message })
-    );
-    segmentDebug.product = product?.error
-      ? { error: product.error }
-      : {
-          fullName: product.full_name,
-          displayName: product.display_name,
-          isVariable: product.is_variable,
-          isBusiness: product.is_business,
-          direction: product.direction,
-          availableFrom: product.available_from,
-          availableTo: product.available_to,
-        };
+    if (includeProductMeta) {
+      const product = await octopusGet(`${OCTOPUS_BASE}/products/${productCode}/`, authHeader).catch(
+        (e) => ({ error: e.message })
+      );
+      segmentDebug.product = product?.error
+        ? { error: product.error }
+        : {
+            fullName: product.full_name,
+            displayName: product.display_name,
+            isVariable: product.is_variable,
+            isBusiness: product.is_business,
+            direction: product.direction,
+            availableFrom: product.available_from,
+            availableTo: product.available_to,
+          };
+    }
 
     try {
       const rates = await fetchAllPages(
@@ -404,9 +550,11 @@ async function buildRateContext(agreements, monthStart, periodEnd, authHeader) {
 
         if (dayRates.length > 0 || nightRates.length > 0) {
           dayNightSegments.push({ segStart, segEnd, dayRates, nightRates });
-        } else {
+        } else if (includeProductMeta) {
           // Genuinely nothing published anywhere for this tariff: probe
-          // with no date filter to confirm it's not just this window.
+          // with no date filter to confirm it's not just this window. Only
+          // bother for the single-month view - not worth another request
+          // per historical tariff segment.
           const probe = await octopusGet(
             `${OCTOPUS_BASE}/products/${productCode}/electricity-tariffs/${tariffCode}/standard-unit-rates/?page_size=3`,
             authHeader
@@ -465,7 +613,7 @@ function lookupRate(slotInstant, kwh, rateContext, dispatchWindows, evThresholdK
 // own JWT obtained from the API key. Degrades gracefully (empty windows) if
 // this account isn't on a smart/Intelligent tariff or the call fails, since
 // the standard off-peak window still applies either way.
-async function fetchDispatchWindows(apiKey, accountNumber, monthStart, periodEnd) {
+async function fetchDispatchWindows(apiKey, accountNumber, rangeStart, rangeEnd) {
   try {
     const tokenRes = await fetch(KRAKEN_GRAPHQL_URL, {
       method: "POST",
@@ -511,13 +659,13 @@ async function fetchDispatchWindows(apiKey, accountNumber, monthStart, periodEnd
     const windows = raw
       .filter((d) => d.start && d.end)
       .map((d) => ({ start: new Date(d.start), end: new Date(d.end) }))
-      .filter((w) => w.end > monthStart && w.start < periodEnd);
+      .filter((w) => w.end > rangeStart && w.start < rangeEnd);
 
     return {
       dispatchWindows: windows,
       dispatchDebug: {
         totalDispatchesEver: raw.length,
-        dispatchesThisMonth: windows.length,
+        dispatchesInRange: windows.length,
         sample: raw.slice(0, 3),
       },
     };
@@ -663,6 +811,55 @@ function getCurrentLondonMonthRange() {
 
   const monthStart = londonWallTimeToUTC(+parts.year, +parts.month, 1, 0, 0, 0);
   return { monthStart, periodEnd: now };
+}
+
+// { y, m } for the London calendar month `monthsAgo` months before the
+// current one (0 = this month).
+function getLondonYearMonth(monthsAgo) {
+  const now = new Date();
+  const parts = new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Europe/London",
+    year: "numeric",
+    month: "2-digit",
+  })
+    .formatToParts(now)
+    .reduce((acc, p) => {
+      acc[p.type] = p.value;
+      return acc;
+    }, {});
+  let y = +parts.year;
+  let m = +parts.month - monthsAgo;
+  while (m <= 0) {
+    m += 12;
+    y -= 1;
+  }
+  return { y, m };
+}
+
+// ["YYYY-MM", ...] for the last 12 calendar months, oldest first, ending
+// with the current (possibly partial) month.
+function getLast12MonthKeys() {
+  const keys = [];
+  for (let i = 11; i >= 0; i--) {
+    const { y, m } = getLondonYearMonth(i);
+    keys.push(`${y}-${String(m).padStart(2, "0")}`);
+  }
+  return keys;
+}
+
+// UTC instants for the start (inclusive) and end (exclusive) of a "YYYY-MM"
+// London calendar month.
+function monthKeyToLondonRange(monthKey) {
+  const [y, m] = monthKey.split("-").map(Number);
+  const start = londonWallTimeToUTC(y, m, 1, 0, 0, 0);
+  let ny = y;
+  let nm = m + 1;
+  if (nm > 12) {
+    nm = 1;
+    ny += 1;
+  }
+  const end = londonWallTimeToUTC(ny, nm, 1, 0, 0, 0);
+  return { start, end };
 }
 
 function londonDateKey(date) {
