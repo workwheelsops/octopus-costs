@@ -3,7 +3,7 @@
 // standing charges that were in force at the time. Designed for Agile-style
 // tariffs where the unit rate changes every 30 minutes, but also works for
 // flat/dual-rate tariffs. The core per-day computation is shared between the
-// current-month view (computeCosts) and the 12-month history view
+// current-month view (computeCosts) and the multi-month history view
 // (computeHistory), since a date range spanning tariff changes already works
 // correctly - agreements are matched by date overlap either way.
 
@@ -82,11 +82,12 @@ export async function computeCosts(env) {
   }
 }
 
-// Totals for each of the last 12 calendar months (Europe/London), including
-// the current partial month. Reuses the exact same per-day pricing logic as
-// computeCosts, just over a wider range and grouped by month afterwards -
-// months on different tariffs are handled automatically since agreements are
-// already matched by date overlap, not assumed to be constant.
+// Totals for each of the last HISTORY_MONTHS calendar months (default 24,
+// Europe/London), including the current partial month. Reuses the exact
+// same per-day pricing logic as computeCosts, just over a wider range and
+// grouped by month afterwards - months on different tariffs are handled
+// automatically since agreements are already matched by date overlap, not
+// assumed to be constant.
 export async function computeHistory(env) {
   const apiKey = env.OCTOPUS_API_KEY;
   const accountNumber = env.OCTOPUS_ACCOUNT_NUMBER;
@@ -102,7 +103,8 @@ export async function computeHistory(env) {
     );
   }
 
-  const monthKeys = getLast12MonthKeys();
+  const historyMonths = env.HISTORY_MONTHS ? Number(env.HISTORY_MONTHS) : 24;
+  const monthKeys = getLastNMonthKeys(historyMonths);
   const rangeStart = monthKeyToLondonRange(monthKeys[0]).start;
   const { periodEnd: rangeEnd } = getCurrentLondonMonthRange();
 
@@ -838,9 +840,9 @@ function getLondonYearMonth(monthsAgo) {
 
 // ["YYYY-MM", ...] for the last 12 calendar months, oldest first, ending
 // with the current (possibly partial) month.
-function getLast12MonthKeys() {
+function getLastNMonthKeys(n) {
   const keys = [];
-  for (let i = 11; i >= 0; i--) {
+  for (let i = n - 1; i >= 0; i--) {
     const { y, m } = getLondonYearMonth(i);
     keys.push(`${y}-${String(m).padStart(2, "0")}`);
   }

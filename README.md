@@ -2,13 +2,16 @@
 
 A small dashboard that shows your Octopus Energy electricity spend for the
 current calendar month: total cost so far, total kWh used, average daily
-cost, and a day-by-day breakdown/chart.
+cost, and a day-by-day breakdown/chart — plus a monthly cost history going
+back 24 months, so you can compare month to month even across tariff
+changes.
 
 It's a Cloudflare Worker with static assets: a static frontend
 (`public/index.html` / `public/style.css` / `public/app.js`) served
 directly, plus a small Worker (`src/worker.js` / `src/costs.js`) that
-handles `GET /api/costs` by talking to the Octopus API server-side, so your
-API key never reaches the browser.
+handles `GET /api/costs` (current month) and `GET /api/history` (monthly
+history) by talking to the Octopus API server-side, so your API key never
+reaches the browser.
 
 ## How it works
 
@@ -39,6 +42,9 @@ If your account also has a solar export meter point, it's auto-detected
 (`is_export: true`) and priced the same way to show export profit per day.
 Override with `OCTOPUS_EXPORT_MPAN` / `OCTOPUS_EXPORT_METER_SERIAL` if
 auto-detection picks the wrong one.
+
+The monthly history view goes back 24 months by default; change with
+`HISTORY_MONTHS` if you want more or less.
 
 ### Intelligent Octopus Go / other smart dual-rate tariffs
 
