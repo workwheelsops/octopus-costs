@@ -92,6 +92,7 @@ export async function computeCosts(env) {
 
     const rateMap = new Map(); // interval_start ISO -> value_inc_vat (pence)
     const standingSegments = []; // { segStart, segEnd, charges: [...] }
+    const dayNightSegments = []; // { segStart, segEnd, dayRates: [...], nightRates: [...] }
     const tariffSegments = []; // debug: what was queried and what came back
 
     for (const agreement of agreements) {
@@ -135,36 +136,43 @@ export async function computeCosts(env) {
         segmentDebug.rateRecordCount = rates.length;
 
         if (rates.length === 0) {
-          // No rates matched this date range: probe the endpoint with no date
-          // filter to see whether this tariff has ANY published rates at all,
-          // and if so, what period they actually cover.
-          const probe = await octopusGet(
-            `${OCTOPUS_BASE}/products/${productCode}/electricity-tariffs/${tariffCode}/standard-unit-rates/?page_size=3`,
+          // Some fixed dual-rate tariffs (e.g. Intelligent Octopus Go) don't
+          // publish half-hourly rates via standard-unit-rates at all; they
+          // expose one flat day rate and one flat night rate instead.
+          const dayRates = await fetchAllPages(
+            `${OCTOPUS_BASE}/products/${productCode}/electricity-tariffs/${tariffCode}/day-unit-rates/` +
+              `?period_from=${segStart.toISOString()}&period_to=${segEnd.toISOString()}&page_size=25000`,
             authHeader
-          ).catch((e) => ({ error: e.message }));
-          if (probe?.error) {
-            segmentDebug.rateProbeError = probe.error;
-          } else {
-            segmentDebug.rateProbe = {
-              totalCountEver: probe?.count ?? null,
-              sample: (probe?.results || []).map((r) => ({
-                valid_from: r.valid_from,
-                valid_to: r.valid_to,
-                value_inc_vat: r.value_inc_vat,
-              })),
-            };
-          }
+          ).catch(() => []);
+          const nightRates = await fetchAllPages(
+            `${OCTOPUS_BASE}/products/${productCode}/electricity-tariffs/${tariffCode}/night-unit-rates/` +
+              `?period_from=${segStart.toISOString()}&period_to=${segEnd.toISOString()}&page_size=25000`,
+            authHeader
+          ).catch(() => []);
+          segmentDebug.dayRateRecordCount = dayRates.length;
+          segmentDebug.nightRateRecordCount = nightRates.length;
 
-          // Some dual-rate tariffs expose rates via day/night endpoints
-          // instead of (or as well as) standard-unit-rates.
-          for (const kind of ["day-unit-rates", "night-unit-rates"]) {
-            const altProbe = await octopusGet(
-              `${OCTOPUS_BASE}/products/${productCode}/electricity-tariffs/${tariffCode}/${kind}/?page_size=3`,
+          if (dayRates.length > 0 || nightRates.length > 0) {
+            dayNightSegments.push({ segStart, segEnd, dayRates, nightRates });
+          } else {
+            // Genuinely nothing published anywhere for this tariff: probe
+            // with no date filter to confirm it's not just this window.
+            const probe = await octopusGet(
+              `${OCTOPUS_BASE}/products/${productCode}/electricity-tariffs/${tariffCode}/standard-unit-rates/?page_size=3`,
               authHeader
             ).catch((e) => ({ error: e.message }));
-            segmentDebug[kind.replace(/-/g, "_")] = altProbe?.error
-              ? { error: altProbe.error }
-              : { totalCountEver: altProbe?.count ?? null, sample: altProbe?.results?.slice(0, 2) };
+            if (probe?.error) {
+              segmentDebug.rateProbeError = probe.error;
+            } else {
+              segmentDebug.rateProbe = {
+                totalCountEver: probe?.count ?? null,
+                sample: (probe?.results || []).map((r) => ({
+                  valid_from: r.valid_from,
+                  valid_to: r.valid_to,
+                  value_inc_vat: r.value_inc_vat,
+                })),
+              };
+            }
           }
         }
       } catch (err) {
@@ -188,8 +196,16 @@ export async function computeCosts(env) {
 
     for (const slot of consumption) {
       const kwh = slot.consumption;
-      const rate = rateMap.get(slot.interval_start);
-      const dateKey = londonDateKey(new Date(slot.interval_start));
+      const slotInstant = new Date(slot.interval_start);
+      let rate = rateMap.get(slot.interval_start);
+      if (rate == null) {
+        const seg = dayNightSegments.find((s) => slotInstant >= s.segStart && slotInstant < s.segEnd);
+        if (seg) {
+          const rates = isOffPeakLondonTime(slotInstant) ? seg.nightRates : seg.dayRates;
+          rate = findActiveRate(rates, slotInstant);
+        }
+      }
+      const dateKey = londonDateKey(slotInstant);
       const entry = dayMap.get(dateKey) || { kwh: 0, costPence: 0, missingRate: false };
       entry.kwh += kwh;
       if (rate != null) {
@@ -300,6 +316,35 @@ function findStandingCharge(segments, dayStartUTC) {
     }
   }
   return null;
+}
+
+function findActiveRate(records, instant) {
+  for (const r of records) {
+    const from = new Date(r.valid_from);
+    const to = r.valid_to ? new Date(r.valid_to) : null;
+    if (instant >= from && (!to || instant < to)) return r.value_inc_vat;
+  }
+  return null;
+}
+
+// Intelligent Octopus Go's standard off-peak window: 23:30 to 05:30, daily,
+// Europe/London local time.
+function isOffPeakLondonTime(date) {
+  const parts = new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Europe/London",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  })
+    .formatToParts(date)
+    .reduce((acc, p) => {
+      acc[p.type] = p.value;
+      return acc;
+    }, {});
+  const minutesOfDay = (+parts.hour % 24) * 60 + +parts.minute;
+  const offPeakStart = 23 * 60 + 30;
+  const offPeakEnd = 5 * 60 + 30;
+  return minutesOfDay >= offPeakStart || minutesOfDay < offPeakEnd;
 }
 
 function getLondonOffsetMinutes(date) {

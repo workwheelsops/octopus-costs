@@ -98,12 +98,10 @@ function renderRateDebug(data, estimatedDays) {
                 .join("; ")
             : "");
       }
-      for (const key of ["day_unit_rates", "night_unit_rates"]) {
-        if (s[key]) {
-          line += s[key].error
-            ? `<br>&nbsp;&nbsp;${key} error: ${s[key].error}`
-            : `<br>&nbsp;&nbsp;${key}: ${s[key].totalCountEver ?? "?"} record(s) exist in total`;
-        }
+      if (s.dayRateRecordCount != null || s.nightRateRecordCount != null) {
+        line +=
+          `<br>&nbsp;&nbsp;day/night rates used instead: ${s.dayRateRecordCount ?? 0} day, ` +
+          `${s.nightRateRecordCount ?? 0} night record(s)`;
       }
       return line;
     })
