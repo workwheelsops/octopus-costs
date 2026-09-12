@@ -29,8 +29,12 @@ export async function computeCosts(env) {
       authHeader
     );
 
-    const property = (account.properties || [])[0];
-    const meterPoint = property?.electricity_meter_points?.[0];
+    const properties = account.properties || [];
+    const property = properties.find((p) => !p.moved_out_at) || properties[0];
+    const meterPoints = property?.electricity_meter_points || [];
+    // Prefer the import meter point over an export one (e.g. solar export),
+    // since export meter points report energy sent out, not consumed.
+    const meterPoint = meterPoints.find((mp) => !mp.is_export) || meterPoints[0];
     if (!meterPoint) {
       return json(
         {
@@ -130,12 +134,22 @@ export async function computeCosts(env) {
     return json({
       accountNumber,
       mpan,
+      meterSerial: serial,
       days,
       totalCostGBP: round(totalCostPence / 100, 2),
       totalKwh: round(totalKwh, 2),
       averageDailyCostGBP: days.length ? round(totalCostPence / 100 / days.length, 2) : 0,
       monthStart: monthStart.toISOString(),
       generatedAt: new Date().toISOString(),
+      debug: {
+        propertyCount: properties.length,
+        meterPointCount: meterPoints.length,
+        meterPointMpans: meterPoints.map((mp) => ({ mpan: mp.mpan, isExport: !!mp.is_export })),
+        agreementCount: agreements.length,
+        periodFrom: monthStart.toISOString(),
+        periodTo: periodEnd.toISOString(),
+        rawConsumptionRecordCount: consumption.length,
+      },
     });
   } catch (err) {
     return json(

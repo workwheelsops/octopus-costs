@@ -19,7 +19,18 @@ async function main() {
 
   if (!data.days || data.days.length === 0) {
     statusEl.hidden = false;
-    statusEl.textContent = "No consumption data is available yet for this month.";
+    const d = data.debug || {};
+    statusEl.innerHTML =
+      "No consumption data is available yet for this month.<br>" +
+      `<small>MPAN <code>${data.mpan ?? "?"}</code>, meter <code>${
+        data.meterSerial ?? "?"
+      }</code> &middot; queried ${d.periodFrom ?? "?"} &rarr; ${d.periodTo ?? "?"} ` +
+      `&middot; Octopus returned ${d.rawConsumptionRecordCount ?? "?"} readings ` +
+      `&middot; ${d.meterPointCount ?? "?"} electricity meter point(s) on account` +
+      (d.meterPointMpans
+        ? ": " + d.meterPointMpans.map((mp) => `${mp.mpan}${mp.isExport ? " (export)" : ""}`).join(", ")
+        : "") +
+      "</small>";
     return;
   }
 
