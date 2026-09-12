@@ -288,6 +288,7 @@ function renderHistoryTable(months) {
       <td>${month.daysWithData ? month.kwh.toFixed(1) : "&mdash;"}</td>
       <td>${month.daysWithData ? gbp.format(month.costGBP) : "&mdash;"}</td>
       <td>${month.exportProfitGBP ? gbp.format(month.exportProfitGBP) : "&mdash;"}</td>
+      <td>${month.axleVppProfitGBP ? gbp.format(month.axleVppProfitGBP) : "&mdash;"}</td>
       <td>${month.daysWithData ? gbp.format(month.netCostGBP) : "&mdash;"}</td>
       <td><small>${tariffLabel}</small></td>
     `;

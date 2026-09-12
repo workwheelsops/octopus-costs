@@ -66,10 +66,25 @@ Axle's earnings/rewards API (`/rewards/{site_id}/info`) requires a
 partner/business-level "organisational token" — there's no self-service way
 for an individual VPP participant to generate one (a personal Home
 Assistant token only covers grid *event* data, not earnings). So this is
-entered manually: check your monthly VPP profit in the Axle app and set it
-as the `AXLE_VPP_PROFIT_GBP` secret. It's shown as a summary card and netted
-into the average daily cost and forecast, but won't update automatically —
-you'll need to update it each month yourself.
+entered manually, one month at a time, as a JSON secret mapping "YYYY-MM" to
+that month's VPP profit — check Axle's Balance tab, total up its "Grid
+event" entries for the month (ignore withdrawals and referral bonuses,
+those aren't VPP profit), and add a line:
+
+```json
+{"2026-08": 18.20, "2026-09": 4.01}
+```
+
+```bash
+npm run secret:axle
+# paste the JSON above (with the current month's real figure) when prompted
+```
+
+It's shown as a summary card for the current month and a column in the
+24-month history, netted into the average daily cost, forecast, and each
+month's net cost. It won't update automatically or backfill old months —
+add a new line each month yourself, and the current month's card updates as
+soon as you redeploy the secret.
 
 Gas is not included.
 

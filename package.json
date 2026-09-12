@@ -8,7 +8,7 @@
     "deploy": "wrangler deploy",
     "secret:key": "wrangler secret put OCTOPUS_API_KEY",
     "secret:account": "wrangler secret put OCTOPUS_ACCOUNT_NUMBER",
-    "secret:axle": "wrangler secret put AXLE_VPP_PROFIT_GBP"
+    "secret:axle": "wrangler secret put AXLE_VPP_PROFIT_JSON"
   },
   "devDependencies": {
     "wrangler": "^4.0.0"

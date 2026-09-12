@@ -41,11 +41,7 @@ export async function computeCosts(env) {
     const totalOnPeakKwh = round(days.reduce((sum, d) => sum + d.onPeakKwh, 0), 2);
     const totalExportProfitGBP = round(days.reduce((sum, d) => sum + d.exportProfitGBP, 0), 2);
 
-    // Axle Energy's VPP earnings aren't available via a personal API token
-    // (only a partner/business-level "organisational token" can reach their
-    // rewards endpoint), so this is entered manually as a fixed monthly
-    // figure rather than pulled live.
-    const axleVppProfitGBP = env.AXLE_VPP_PROFIT_GBP ? Number(env.AXLE_VPP_PROFIT_GBP) : 0;
+    const axleVppProfitGBP = getAxleVppProfitGBP(env, londonDateKey(monthStart).slice(0, 7));
 
     const averageDailyCostGBP = days.length
       ? round((totalCostPence / 100 - totalExportProfitGBP - axleVppProfitGBP) / days.length, 2)
@@ -167,6 +163,7 @@ export async function computeHistory(env) {
 
     const months = monthKeys.map((key) => {
       const e = monthTotals.get(key);
+      const axleVppProfitGBP = getAxleVppProfitGBP(env, key);
       return {
         month: key,
         kwh: round(e.kwh, 2),
@@ -175,7 +172,8 @@ export async function computeHistory(env) {
         onPeakCostGBP: round(e.onPeakCostGBP, 2),
         standingChargeGBP: round(e.standingChargeGBP, 2),
         exportProfitGBP: round(e.exportProfitGBP, 2),
-        netCostGBP: round(e.costGBP - e.exportProfitGBP, 2),
+        axleVppProfitGBP: round(axleVppProfitGBP, 2),
+        netCostGBP: round(e.costGBP - e.exportProfitGBP - axleVppProfitGBP, 2),
         daysWithData: e.daysWithData,
         estimatedDays: e.estimatedDays,
         tariffs: e.tariffs,
@@ -966,6 +964,36 @@ function londonDateKeyToUTC(dateKey) {
 function getDaysInLondonMonth(monthStart) {
   const [y, m] = londonDateKey(monthStart).split("-").map(Number);
   return new Date(Date.UTC(y, m, 0)).getUTCDate();
+}
+
+// Axle Energy's VPP earnings aren't available via a personal API token (only
+// a partner/business-level "organisational token" can reach their rewards
+// endpoint), so this is entered manually as a month-keyed map you add one
+// line to each month, e.g. {"2026-08": 18.20, "2026-09": 4.01}.
+function getAxleVppProfitMap(env) {
+  if (!env.AXLE_VPP_PROFIT_JSON) return {};
+  try {
+    const parsed = JSON.parse(env.AXLE_VPP_PROFIT_JSON);
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function getAxleVppProfitGBP(env, monthKey) {
+  const map = getAxleVppProfitMap(env);
+  if (Object.prototype.hasOwnProperty.call(map, monthKey)) {
+    const v = Number(map[monthKey]);
+    return Number.isFinite(v) ? v : 0;
+  }
+  // Backward compatible fallback for the older flat secret, applied only to
+  // the current month (it predates per-month tracking).
+  const currentMonthKey = londonDateKey(new Date()).slice(0, 7);
+  if (monthKey === currentMonthKey && env.AXLE_VPP_PROFIT_GBP) {
+    const v = Number(env.AXLE_VPP_PROFIT_GBP);
+    return Number.isFinite(v) ? v : 0;
+  }
+  return 0;
 }
 
 function maxDate(a, b) {
