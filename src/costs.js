@@ -535,6 +535,11 @@ async function buildRateContext(
       segmentDebug.rateRecordCount = rates.length;
 
       if (rates.length > 0) {
+        segmentDebug.rateSample = rates.slice(0, 5).map((r) => ({
+          valid_from: r.valid_from,
+          valid_to: r.valid_to,
+          value_inc_vat: r.value_inc_vat,
+        }));
         // Not every "standard-unit-rates" tariff actually changes every 30
         // minutes: some fixed tariffs publish it too, but with a handful of
         // records each covering a wide validity window (days, not a single
