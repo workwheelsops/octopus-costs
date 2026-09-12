@@ -94,7 +94,19 @@ async function computeSwitchSavings(env, breakdown, authHeader, rangeEnd, evThre
     .slice()
     .sort((a, b) => new Date(a.segStart) - new Date(b.segStart));
 
-  const switchSegment = importSegments.find((s) => /INTELLI|IOG/i.test(s.productCode || ""));
+  // Walk backward from the most recent segment through the unbroken trailing
+  // run of Intelligent Octopus Go-family tariffs, to find when the switch
+  // that's still in effect actually happened - not just the first-ever
+  // match, which could be an earlier trial that was later abandoned (e.g.
+  // switching to Intelligent, back to Agile, then to Intelligent for good).
+  let switchSegment = null;
+  for (let i = importSegments.length - 1; i >= 0; i--) {
+    if (/INTELLI|IOG/i.test(importSegments[i].productCode || "")) {
+      switchSegment = importSegments[i];
+    } else {
+      break;
+    }
+  }
   if (!switchSegment) return null;
 
   const switchDate = new Date(switchSegment.segStart);
