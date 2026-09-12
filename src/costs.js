@@ -483,6 +483,7 @@ async function buildRateContext(
   { includeProductMeta = true } = {}
 ) {
   const rateMap = new Map(); // instant (ms since epoch) -> value_inc_vat (pence)
+  const rateSegments = []; // { segStart, segEnd, rates: [...] } - fallback for sparse rate records
   const standingSegments = []; // { segStart, segEnd, charges: [...] }
   const dayNightSegments = []; // { segStart, segEnd, dayRates: [...], nightRates: [...] }
   const tariffSegments = []; // debug: what was queried and what came back
@@ -532,6 +533,17 @@ async function buildRateContext(
       // so string equality would silently miss every match.
       for (const r of rates) rateMap.set(new Date(r.valid_from).getTime(), r.value_inc_vat);
       segmentDebug.rateRecordCount = rates.length;
+
+      if (rates.length > 0) {
+        // Not every "standard-unit-rates" tariff actually changes every 30
+        // minutes: some fixed tariffs publish it too, but with a handful of
+        // records each covering a wide validity window (days, not a single
+        // slot). The exact-instant map above only ever matches the first
+        // slot after each such change, so keep the raw records too and fall
+        // back to interval-containment matching (lookupRate) when the map
+        // misses - cheap since it only runs for the slots that need it.
+        rateSegments.push({ segStart, segEnd, rates });
+      }
 
       if (rates.length === 0) {
         // Some fixed dual-rate tariffs (e.g. Intelligent Octopus Go) don't
@@ -592,21 +604,34 @@ async function buildRateContext(
     }
   }
 
-  return { rateMap, standingSegments, dayNightSegments, tariffSegments };
+  return { rateMap, rateSegments, standingSegments, dayNightSegments, tariffSegments };
 }
 
 // Looks up the rate (pence/kWh inc VAT) for one consumption slot: first the
 // half-hourly rateMap, then the day/night fallback if that misses.
 function lookupRate(slotInstant, kwh, rateContext, dispatchWindows, evThresholdKwh) {
-  const rate = rateContext.rateMap.get(slotInstant.getTime());
-  if (rate != null) return rate;
-  const seg = rateContext.dayNightSegments.find(
+  const exactRate = rateContext.rateMap.get(slotInstant.getTime());
+  if (exactRate != null) return exactRate;
+
+  // Exact-instant match missed: either this tariff's standard-unit-rates
+  // records don't align one-to-one with consumption slots (a "fixed" tariff
+  // with a handful of wide-validity records rather than true half-hourly
+  // ones), or there's a genuine gap. Fall back to interval containment.
+  const rateSeg = rateContext.rateSegments.find(
     (s) => slotInstant >= s.segStart && slotInstant < s.segEnd
   );
-  if (!seg) return null;
+  if (rateSeg) {
+    const rate = findActiveRate(rateSeg.rates, slotInstant);
+    if (rate != null) return rate;
+  }
+
+  const dayNightSeg = rateContext.dayNightSegments.find(
+    (s) => slotInstant >= s.segStart && slotInstant < s.segEnd
+  );
+  if (!dayNightSeg) return null;
   const rates = isOffPeak(slotInstant, kwh, dispatchWindows, evThresholdKwh)
-    ? seg.nightRates
-    : seg.dayRates;
+    ? dayNightSeg.nightRates
+    : dayNightSeg.dayRates;
   return findActiveRate(rates, slotInstant);
 }
 
