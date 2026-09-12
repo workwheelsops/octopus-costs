@@ -225,6 +225,12 @@ export async function computeCosts(env) {
     const sampleSlot = consumption[0];
     const sampleRateKeys = [...rateMap.keys()].slice(0, 3).map((t) => new Date(t).toISOString());
 
+    const averageDailyCostGBP = days.length
+      ? round((totalCostPence / 100 - totalExportProfitGBP) / days.length, 2)
+      : 0;
+    const daysInMonth = getDaysInLondonMonth(monthStart);
+    const forecastCostGBP = round(averageDailyCostGBP * daysInMonth, 2);
+
     return json({
       accountNumber,
       mpan,
@@ -237,9 +243,9 @@ export async function computeCosts(env) {
       totalOffPeakKwh,
       totalOnPeakKwh,
       totalExportProfitGBP,
-      averageDailyCostGBP: days.length
-        ? round((totalCostPence / 100 - totalExportProfitGBP) / days.length, 2)
-        : 0,
+      averageDailyCostGBP,
+      daysInMonth,
+      forecastCostGBP,
       monthStart: monthStart.toISOString(),
       generatedAt: new Date().toISOString(),
       debug: {
@@ -529,6 +535,11 @@ function londonDateKey(date) {
 function londonDateKeyToUTC(dateKey) {
   const [y, m, d] = dateKey.split("-").map(Number);
   return londonWallTimeToUTC(y, m, d, 0, 0, 0);
+}
+
+function getDaysInLondonMonth(monthStart) {
+  const [y, m] = londonDateKey(monthStart).split("-").map(Number);
+  return new Date(Date.UTC(y, m, 0)).getUTCDate();
 }
 
 function maxDate(a, b) {

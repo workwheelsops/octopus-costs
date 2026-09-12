@@ -49,6 +49,8 @@ async function main() {
   document.getElementById("total-kwh").textContent = `${data.totalKwh.toFixed(1)} kWh`;
   document.getElementById("avg-cost").textContent = gbp.format(data.averageDailyCostGBP);
   document.getElementById("day-count").textContent = data.days.length;
+  document.getElementById("forecast-cost").textContent = gbp.format(data.forecastCostGBP ?? 0);
+  document.getElementById("forecast-sub").textContent = `over ${data.daysInMonth ?? "?"} days`;
   document.getElementById("offpeak-cost").textContent = gbp.format(data.totalOffPeakCostGBP ?? 0);
   document.getElementById("offpeak-kwh").textContent = `${(data.totalOffPeakKwh ?? 0).toFixed(1)} kWh`;
   document.getElementById("onpeak-cost").textContent = gbp.format(data.totalOnPeakCostGBP ?? 0);
