@@ -63,6 +63,12 @@ async function main() {
     document.getElementById("export-profit").textContent = gbp.format(data.totalExportProfitGBP ?? 0);
   }
 
+  const hasAxle = !!data.axleVppProfitGBP;
+  document.getElementById("axle-card").hidden = !hasAxle;
+  if (hasAxle) {
+    document.getElementById("axle-profit").textContent = gbp.format(data.axleVppProfitGBP);
+  }
+
   document.getElementById("summary").hidden = false;
 
   renderChart(data.days);

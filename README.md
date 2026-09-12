@@ -54,6 +54,17 @@ API field marking a reading as EV-charging specifically. If this
 misclassifies genuine high-power appliance use in your home (e.g. an
 electric shower or tumble dryer), set `OCTOPUS_EV_THRESHOLD_KWH` higher.
 
+### Axle Energy VPP profit
+
+Axle's earnings/rewards API (`/rewards/{site_id}/info`) requires a
+partner/business-level "organisational token" — there's no self-service way
+for an individual VPP participant to generate one (a personal Home
+Assistant token only covers grid *event* data, not earnings). So this is
+entered manually: check your monthly VPP profit in the Axle app and set it
+as the `AXLE_VPP_PROFIT_GBP` secret. It's shown as a summary card and netted
+into the average daily cost and forecast, but won't update automatically —
+you'll need to update it each month yourself.
+
 Gas is not included.
 
 ## Prerequisites

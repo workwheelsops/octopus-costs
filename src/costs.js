@@ -266,8 +266,14 @@ export async function computeCosts(env) {
     const sampleSlot = consumption[0];
     const sampleRateKeys = [...rateMap.keys()].slice(0, 3).map((t) => new Date(t).toISOString());
 
+    // Axle Energy's VPP earnings aren't available via a personal API token
+    // (only a partner/business-level "organisational token" can reach their
+    // rewards endpoint), so this is entered manually as a fixed monthly
+    // figure rather than pulled live.
+    const axleVppProfitGBP = env.AXLE_VPP_PROFIT_GBP ? Number(env.AXLE_VPP_PROFIT_GBP) : 0;
+
     const averageDailyCostGBP = days.length
-      ? round((totalCostPence / 100 - totalExportProfitGBP) / days.length, 2)
+      ? round((totalCostPence / 100 - totalExportProfitGBP - axleVppProfitGBP) / days.length, 2)
       : 0;
     const daysInMonth = getDaysInLondonMonth(monthStart);
     const forecastCostGBP = round(averageDailyCostGBP * daysInMonth, 2);
@@ -284,6 +290,7 @@ export async function computeCosts(env) {
       totalOffPeakKwh,
       totalOnPeakKwh,
       totalExportProfitGBP,
+      axleVppProfitGBP,
       averageDailyCostGBP,
       daysInMonth,
       forecastCostGBP,
