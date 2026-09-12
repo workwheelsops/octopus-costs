@@ -77,9 +77,25 @@ async function main() {
   document.getElementById("footer").hidden = false;
 
   const estimatedDays = data.days.filter((d) => d.estimated).length;
-  if (estimatedDays > 0) {
+  const dispatchIssue = data.debug?.dispatches?.error || data.debug?.dispatches?.errors;
+  if (estimatedDays > 0 || data.debug?.dispatches) {
     statusEl.hidden = false;
-    statusEl.innerHTML = renderRateDebug(data, estimatedDays);
+    let html = estimatedDays > 0 ? renderRateDebug(data, estimatedDays) : "";
+    if (dispatchIssue) {
+      const d = data.debug.dispatches;
+      html +=
+        (html ? "<br><br>" : "") +
+        `Couldn't fetch smart-charge dispatch history (step: ${d.step ?? "?"}): ` +
+        `${Array.isArray(dispatchIssue) ? dispatchIssue.join("; ") : dispatchIssue}. ` +
+        "Off-peak pricing is using the standard 23:30–05:30 window only, so on nights with a bonus " +
+        "smart-charge dispatch the peak/off-peak split (and total cost) may be less accurate than usual.";
+    } else if (data.debug?.dispatches?.dispatchesThisMonth != null) {
+      html +=
+        (html ? "<br><br>" : "") +
+        `Found ${data.debug.dispatches.dispatchesThisMonth} smart-charge dispatch window(s) this month, ` +
+        "applied on top of the standard off-peak window.";
+    }
+    statusEl.innerHTML = html;
   }
 }
 

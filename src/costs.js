@@ -5,6 +5,7 @@
 // minutes, but also works for flat tariffs (the rate is just constant).
 
 const OCTOPUS_BASE = "https://api.octopus.energy/v1";
+const KRAKEN_GRAPHQL_URL = "https://api.octopus.energy/v1/graphql/";
 
 export async function computeCosts(env) {
   const apiKey = env.OCTOPUS_API_KEY;
@@ -93,6 +94,18 @@ export async function computeCosts(env) {
     const rateContext = await buildRateContext(agreements, monthStart, periodEnd, authHeader);
     const { rateMap, dayNightSegments, standingSegments, tariffSegments } = rateContext;
 
+    // Intelligent Octopus Go's real off-peak eligibility isn't just the
+    // advertised 23:30-05:30 window: Octopus grants extra "smart charge"
+    // dispatch windows on top of it, which vary night to night. Fetch the
+    // account's actual completed dispatches via the (separate) GraphQL API
+    // so those bonus windows count as off-peak too.
+    const { dispatchWindows, dispatchDebug } = await fetchDispatchWindows(
+      apiKey,
+      accountNumber,
+      monthStart,
+      periodEnd
+    );
+
     // Export: many solar accounts have a second, export-only meter point.
     // Auto-detect it and price its consumption (= energy sent to the grid)
     // the same way, to work out export earnings per day.
@@ -133,7 +146,7 @@ export async function computeCosts(env) {
           const kwh = slot.consumption;
           totalExportKwh += kwh;
           const slotInstant = new Date(slot.interval_start);
-          const rate = lookupRate(slotInstant, exportRateContext);
+          const rate = lookupRate(slotInstant, exportRateContext, dispatchWindows);
           if (rate == null) {
             slotsWithNoRate++;
             continue;
@@ -162,8 +175,8 @@ export async function computeCosts(env) {
     for (const slot of consumption) {
       const kwh = slot.consumption;
       const slotInstant = new Date(slot.interval_start);
-      const offPeak = isOffPeakLondonTime(slotInstant);
-      const rate = lookupRate(slotInstant, rateContext);
+      const offPeak = isOffPeak(slotInstant, dispatchWindows);
+      const rate = lookupRate(slotInstant, rateContext, dispatchWindows);
       const dateKey = londonDateKey(slotInstant);
       const entry =
         dayMap.get(dateKey) ||
@@ -263,6 +276,7 @@ export async function computeCosts(env) {
         sampleConsumptionIntervalStart: sampleSlot?.interval_start ?? null,
         sampleRateKeys,
         export: exportDebug,
+        dispatches: dispatchDebug,
       },
     });
   } catch (err) {
@@ -390,15 +404,81 @@ async function buildRateContext(agreements, monthStart, periodEnd, authHeader) {
 
 // Looks up the rate (pence/kWh inc VAT) for one consumption slot: first the
 // half-hourly rateMap, then the day/night fallback if that misses.
-function lookupRate(slotInstant, rateContext) {
+function lookupRate(slotInstant, rateContext, dispatchWindows) {
   const rate = rateContext.rateMap.get(slotInstant.getTime());
   if (rate != null) return rate;
   const seg = rateContext.dayNightSegments.find(
     (s) => slotInstant >= s.segStart && slotInstant < s.segEnd
   );
   if (!seg) return null;
-  const rates = isOffPeakLondonTime(slotInstant) ? seg.nightRates : seg.dayRates;
+  const rates = isOffPeak(slotInstant, dispatchWindows) ? seg.nightRates : seg.dayRates;
   return findActiveRate(rates, slotInstant);
+}
+
+// Fetches the account's actual smart-charge dispatch history via Octopus's
+// GraphQL (Kraken) API, which is separate from the REST v1 API and needs its
+// own JWT obtained from the API key. Degrades gracefully (empty windows) if
+// this account isn't on a smart/Intelligent tariff or the call fails, since
+// the standard off-peak window still applies either way.
+async function fetchDispatchWindows(apiKey, accountNumber, monthStart, periodEnd) {
+  try {
+    const tokenRes = await fetch(KRAKEN_GRAPHQL_URL, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        query:
+          "mutation krakenTokenAuthentication($input: ObtainJSONWebTokenInput!) { " +
+          "obtainKrakenToken(input: $input) { token } }",
+        variables: { input: { APIKey: apiKey } },
+      }),
+    });
+    const tokenData = await tokenRes.json();
+    if (tokenData.errors?.length) {
+      return {
+        dispatchWindows: [],
+        dispatchDebug: { step: "auth", errors: tokenData.errors.map((e) => e.message) },
+      };
+    }
+    const token = tokenData.data?.obtainKrakenToken?.token;
+    if (!token) {
+      return { dispatchWindows: [], dispatchDebug: { step: "auth", error: "No token returned" } };
+    }
+
+    const dispatchRes = await fetch(KRAKEN_GRAPHQL_URL, {
+      method: "POST",
+      headers: { "content-type": "application/json", Authorization: token },
+      body: JSON.stringify({
+        query:
+          "query getCompletedDispatches($accountNumber: String!) { " +
+          "completedDispatches(accountNumber: $accountNumber) { start end delta meta { source location } } }",
+        variables: { accountNumber },
+      }),
+    });
+    const dispatchData = await dispatchRes.json();
+    if (dispatchData.errors?.length) {
+      return {
+        dispatchWindows: [],
+        dispatchDebug: { step: "completedDispatches", errors: dispatchData.errors.map((e) => e.message) },
+      };
+    }
+
+    const raw = dispatchData.data?.completedDispatches ?? [];
+    const windows = raw
+      .filter((d) => d.start && d.end)
+      .map((d) => ({ start: new Date(d.start), end: new Date(d.end) }))
+      .filter((w) => w.end > monthStart && w.start < periodEnd);
+
+    return {
+      dispatchWindows: windows,
+      dispatchDebug: {
+        totalDispatchesEver: raw.length,
+        dispatchesThisMonth: windows.length,
+        sample: raw.slice(0, 3),
+      },
+    };
+  } catch (err) {
+    return { dispatchWindows: [], dispatchDebug: { step: "exception", error: err.message } };
+  }
 }
 
 async function octopusGet(url, authHeader) {
@@ -454,9 +534,11 @@ function findActiveRate(records, instant) {
   return null;
 }
 
-// Intelligent Octopus Go's standard off-peak window: 23:30 to 05:30, daily,
-// Europe/London local time.
-function isOffPeakLondonTime(date) {
+// Intelligent Octopus Go's advertised baseline off-peak window: 23:30 to
+// 05:30, daily, Europe/London local time. Octopus tops this up with extra
+// "smart charge" dispatch windows on top, which vary night to night -
+// see isOffPeak below, which is what should actually be used for pricing.
+function isStandardOffPeakWindow(date) {
   const parts = new Intl.DateTimeFormat("en-GB", {
     timeZone: "Europe/London",
     hour: "2-digit",
@@ -472,6 +554,13 @@ function isOffPeakLondonTime(date) {
   const offPeakStart = 23 * 60 + 30;
   const offPeakEnd = 5 * 60 + 30;
   return minutesOfDay >= offPeakStart || minutesOfDay < offPeakEnd;
+}
+
+// A slot is off-peak if it's within the standard baseline window, OR within
+// one of the account's actual smart-charge dispatch windows for that night.
+function isOffPeak(date, dispatchWindows) {
+  if (isStandardOffPeakWindow(date)) return true;
+  return dispatchWindows.some((w) => date >= w.start && date < w.end);
 }
 
 function getLondonOffsetMinutes(date) {
