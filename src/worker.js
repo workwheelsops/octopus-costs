@@ -1,11 +1,14 @@
-import { computeCosts, computeHistory } from "./costs.js";
+import { computeCosts, computeHistoricalMonths, computeCurrentMonthHistory } from "./costs.js";
 
-// 24 months of history means ~34k consumption records plus rates for every
-// historical tariff change - slow and wasteful to recompute on every load
-// since everything before the current month is final. Cache it at the edge;
-// append ?refresh=1 to force a recompute (e.g. right after adding a secret
-// that changes how it's priced).
-const HISTORY_CACHE_SECONDS = 30 * 60;
+// Closed historical months never change once the month ends, so they're
+// cached for a long time - there's no reason to re-fetch ~34k consumption
+// records plus every historical tariff's rates just because the cache
+// expired. The current (still open) month is cheap to compute on its own
+// (one month, not up to 24) and changes throughout the day, so it's cached
+// for much less time. Append ?refresh=1 to force both to recompute (e.g.
+// right after adding a secret that changes how something is priced).
+const HISTORICAL_CACHE_SECONDS = 24 * 60 * 60;
+const CURRENT_MONTH_CACHE_SECONDS = 30 * 60;
 
 export default {
   async fetch(request, env) {
@@ -15,13 +18,55 @@ export default {
     }
     if (url.pathname === "/api/history" && request.method === "GET") {
       const forceRefresh = url.searchParams.has("refresh");
-      return withEdgeCache(request, env, forceRefresh, () => computeHistory(env), HISTORY_CACHE_SECONDS);
+      return handleHistory(request, env, forceRefresh);
     }
     return env.ASSETS.fetch(request);
   },
 };
 
-async function withEdgeCache(request, env, forceRefresh, computeFn, ttlSeconds) {
+async function handleHistory(request, env, forceRefresh) {
+  const historicalRes = await withEdgeCache(
+    request,
+    env,
+    forceRefresh,
+    () => computeHistoricalMonths(env),
+    HISTORICAL_CACHE_SECONDS,
+    "historical"
+  );
+  if (historicalRes.status !== 200) return historicalRes;
+  const historical = await historicalRes.clone().json();
+
+  const currentRes = await withEdgeCache(
+    request,
+    env,
+    forceRefresh,
+    () => computeCurrentMonthHistory(env, historical.finalRunningSavingGBP ?? 0),
+    CURRENT_MONTH_CACHE_SECONDS,
+    "current"
+  );
+  if (currentRes.status !== 200) return currentRes;
+  const current = await currentRes.clone().json();
+
+  const merged = {
+    accountNumber: current.accountNumber ?? historical.accountNumber,
+    mpan: current.mpan ?? historical.mpan,
+    meterSerial: current.meterSerial ?? historical.meterSerial,
+    months: [...historical.months, ...current.months],
+    periodFrom: historical.periodFrom,
+    periodTo: current.periodTo,
+    generatedAt: new Date().toISOString(),
+    debug: { historical: historical.debug, current: current.debug },
+  };
+
+  const headers = new Headers({ "content-type": "application/json; charset=utf-8" });
+  headers.set(
+    "X-Cache-Generated-At",
+    currentRes.headers.get("X-Cache-Generated-At") || new Date().toISOString()
+  );
+  return new Response(JSON.stringify(merged), { status: 200, headers });
+}
+
+async function withEdgeCache(request, env, forceRefresh, computeFn, ttlSeconds, keySuffix) {
   const cache = caches.default;
   // caches.default is per-datacenter and has no idea the Worker's code
   // changed between deploys, so a stale response from the previous version
@@ -31,7 +76,9 @@ async function withEdgeCache(request, env, forceRefresh, computeFn, ttlSeconds) 
   // simply never looked up again rather than needing manual invalidation.
   const version = env.CF_VERSION_METADATA?.id ?? "dev";
   const url = new URL(request.url);
-  const cacheKey = new Request(`${url.origin}${url.pathname}?v=${version}`, { method: "GET" });
+  const cacheKey = new Request(`${url.origin}${url.pathname}?v=${version}&part=${keySuffix}`, {
+    method: "GET",
+  });
 
   if (!forceRefresh) {
     const cached = await cache.match(cacheKey);

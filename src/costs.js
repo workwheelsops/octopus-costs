@@ -3,9 +3,10 @@
 // standing charges that were in force at the time. Designed for Agile-style
 // tariffs where the unit rate changes every 30 minutes, but also works for
 // flat/dual-rate tariffs. The core per-day computation is shared between the
-// current-month view (computeCosts) and the multi-month history view
-// (computeHistory), since a date range spanning tariff changes already works
-// correctly - agreements are matched by date overlap either way.
+// current-month view (computeCosts) and the multi-month history views
+// (computeHistoricalMonths / computeCurrentMonthHistory), since a date range
+// spanning tariff changes already works correctly - agreements are matched
+// by date overlap either way.
 
 const OCTOPUS_BASE = "https://api.octopus.energy/v1";
 const KRAKEN_GRAPHQL_URL = "https://api.octopus.energy/v1/graphql/";
@@ -83,39 +84,62 @@ export async function computeCosts(env) {
   }
 }
 
+// Finds when the account switched (and stuck with) an Intelligent Octopus
+// Go-family tariff, and whatever tariff was active immediately before that -
+// based on the account's raw agreement history, independent of whatever date
+// range is being queried/priced. This means it gives the same answer whether
+// called for a one-month or a 24-month window, which matters now that
+// history is computed in separate historical/current-month chunks.
+function detectTariffSwitch(agreements) {
+  const candidates = (agreements || [])
+    .filter((a) => a.tariff_code)
+    .map((a) => ({
+      tariffCode: a.tariff_code,
+      productCode: parseProductCode(a.tariff_code),
+      validFrom: new Date(a.valid_from),
+      validTo: a.valid_to ? new Date(a.valid_to) : null,
+    }))
+    .filter((a) => a.productCode)
+    .sort((a, b) => a.validFrom - b.validFrom);
+
+  // Walk backward from the most recent agreement through the unbroken
+  // trailing run of Intelligent Octopus Go-family tariffs, to find when the
+  // switch that's still in effect actually happened - not just the
+  // first-ever match, which could be an earlier trial that was later
+  // abandoned (e.g. switching to Intelligent, back to Agile, then to
+  // Intelligent for good).
+  let switchAgreement = null;
+  for (let i = candidates.length - 1; i >= 0; i--) {
+    if (/INTELLI|IOG/i.test(candidates[i].productCode)) {
+      switchAgreement = candidates[i];
+    } else {
+      break;
+    }
+  }
+  if (!switchAgreement) return null;
+
+  const switchDate = switchAgreement.validFrom;
+  const baseline = candidates
+    .filter((a) => a.validTo && a.validTo.getTime() <= switchDate.getTime())
+    .sort((a, b) => b.validTo - a.validTo)[0];
+  if (!baseline) return null;
+
+  return { switchDate, baselineTariffCode: baseline.tariffCode };
+}
+
 // Compares actual cost since switching to an Intelligent Octopus Go-family
 // tariff against what the exact same real usage would have cost on whatever
 // tariff was active immediately before, using that tariff's real published
 // rates for the same period (it's still a live product on Octopus's side
 // even though this account has moved off it). Returns null if no such
-// switch is found in the account's history.
-async function computeSwitchSavings(env, breakdown, authHeader, rangeEnd, evThresholdKwh) {
-  const importSegments = (breakdown.debug.tariffSegments || [])
-    .slice()
-    .sort((a, b) => new Date(a.segStart) - new Date(b.segStart));
+// switch is found in the account's history. `consumption` only needs to
+// cover whatever range is being priced by the caller - the switch/baseline
+// detection itself always looks at the full agreement history regardless.
+async function computeSwitchSavings(agreements, consumption, authHeader, rangeEnd, evThresholdKwh) {
+  const switchInfo = detectTariffSwitch(agreements);
+  if (!switchInfo) return null;
+  const { switchDate, baselineTariffCode } = switchInfo;
 
-  // Walk backward from the most recent segment through the unbroken trailing
-  // run of Intelligent Octopus Go-family tariffs, to find when the switch
-  // that's still in effect actually happened - not just the first-ever
-  // match, which could be an earlier trial that was later abandoned (e.g.
-  // switching to Intelligent, back to Agile, then to Intelligent for good).
-  let switchSegment = null;
-  for (let i = importSegments.length - 1; i >= 0; i--) {
-    if (/INTELLI|IOG/i.test(importSegments[i].productCode || "")) {
-      switchSegment = importSegments[i];
-    } else {
-      break;
-    }
-  }
-  if (!switchSegment) return null;
-
-  const switchDate = new Date(switchSegment.segStart);
-  const baselineSegment = importSegments
-    .filter((s) => new Date(s.segEnd).getTime() <= switchDate.getTime())
-    .sort((a, b) => new Date(b.segEnd) - new Date(a.segEnd))[0];
-  if (!baselineSegment) return null;
-
-  const baselineTariffCode = baselineSegment.tariffCode;
   const fakeAgreement = {
     tariff_code: baselineTariffCode,
     valid_from: switchDate.toISOString(),
@@ -132,9 +156,9 @@ async function computeSwitchSavings(env, breakdown, authHeader, rangeEnd, evThre
   const hypotheticalByDate = new Map(); // londonDateKey -> costPence
   const slotCoverageByMonth = new Map(); // monthKey -> { total, missing }
 
-  for (const slot of breakdown.consumption) {
+  for (const slot of consumption) {
     const slotInstant = new Date(slot.interval_start);
-    if (slotInstant < switchDate) continue;
+    if (slotInstant < switchDate || slotInstant >= rangeEnd) continue;
     const kwh = slot.consumption;
     const dateKey = londonDateKey(slotInstant);
     const monthKey = dateKey.slice(0, 7);
@@ -183,17 +207,8 @@ async function computeSwitchSavings(env, breakdown, authHeader, rangeEnd, evThre
   };
 }
 
-// Totals for each of the last HISTORY_MONTHS calendar months (default 24,
-// Europe/London), including the current partial month. Reuses the exact
-// same per-day pricing logic as computeCosts, just over a wider range and
-// grouped by month afterwards - months on different tariffs are handled
-// automatically since agreements are already matched by date overlap, not
-// assumed to be constant.
-export async function computeHistory(env) {
-  const apiKey = env.OCTOPUS_API_KEY;
-  const accountNumber = env.OCTOPUS_ACCOUNT_NUMBER;
-
-  if (!apiKey || !accountNumber) {
+function checkConfigured(env) {
+  if (!env.OCTOPUS_API_KEY || !env.OCTOPUS_ACCOUNT_NUMBER) {
     return json(
       {
         error: "not_configured",
@@ -203,135 +218,231 @@ export async function computeHistory(env) {
       500
     );
   }
+  return null;
+}
+
+// Totals for a set of calendar months (Europe/London) over [rangeStart,
+// rangeEnd). Shared by the historical (many closed months, long-cached) and
+// current-month (one open month, always fresh) history views - both need
+// the same per-day pricing, monthly grouping, tariff-name lookup, and
+// switch-savings logic, just over different ranges. `priorRunningSavingGBP`
+// lets the current-month caller carry forward the running total left off by
+// the historical block, so the two can be computed and cached separately
+// while still producing one continuous running total.
+async function computeMonthsBlock(
+  env,
+  monthKeys,
+  rangeStart,
+  rangeEnd,
+  { includeProductMeta = false, priorRunningSavingGBP = 0 } = {}
+) {
+  const apiKey = env.OCTOPUS_API_KEY;
+  const authHeader = "Basic " + btoa(`${apiKey}:`);
+
+  const breakdown = await computeDailyBreakdown(env, rangeStart, rangeEnd, { includeProductMeta });
+  const { days } = breakdown;
+
+  const monthTotals = new Map();
+  for (const key of monthKeys) {
+    monthTotals.set(key, {
+      kwh: 0,
+      costGBP: 0,
+      offPeakCostGBP: 0,
+      onPeakCostGBP: 0,
+      standingChargeGBP: 0,
+      exportProfitGBP: 0,
+      daysWithData: 0,
+      estimatedDays: 0,
+    });
+  }
+  for (const d of days) {
+    const entry = monthTotals.get(d.date.slice(0, 7));
+    if (!entry) continue;
+    entry.kwh += d.kwh;
+    entry.costGBP += d.costGBP;
+    entry.offPeakCostGBP += d.offPeakCostGBP;
+    entry.onPeakCostGBP += d.onPeakCostGBP;
+    entry.standingChargeGBP += d.standingChargeGBP;
+    entry.exportProfitGBP += d.exportProfitGBP;
+    entry.daysWithData++;
+    if (d.estimated) entry.estimatedDays++;
+  }
+
+  // Which tariff(s) were active each month, since some months may differ.
+  // Look up each distinct product's real display name from Octopus rather
+  // than showing raw codes like "E-1R-IOG-SMB-FIX-12M-26-04-18-A".
+  const allTariffSegments = [
+    ...(breakdown.debug.tariffSegments || []),
+    ...(breakdown.debug.export?.tariffSegments || []),
+  ];
+  const uniqueProductCodes = [...new Set(allTariffSegments.map((s) => s.productCode).filter(Boolean))];
+  const displayNames = await fetchProductDisplayNames(uniqueProductCodes, authHeader);
+
+  for (const key of monthKeys) {
+    const { start, end } = monthKeyToLondonRange(key);
+    const effectiveEnd = minDate(end, rangeEnd);
+    const overlapping = allTariffSegments.filter(
+      (s) => new Date(s.segStart) < effectiveEnd && new Date(s.segEnd) > start
+    );
+    monthTotals.get(key).tariffs = [
+      ...new Set(overlapping.map((s) => displayNames.get(s.productCode) || s.tariffCode)),
+    ];
+  }
+
+  // Saving per month since switching to Intelligent Octopus Go (or a
+  // sibling IOG-family tariff), versus what the same real usage would
+  // have cost on whichever tariff was active immediately before. Switch
+  // detection itself always looks at the full agreement history, so it
+  // gives the same answer regardless of how narrow this block's range is.
+  const switchSavings = await computeSwitchSavings(
+    breakdown.agreements,
+    breakdown.consumption,
+    authHeader,
+    rangeEnd,
+    breakdown.debug.evThresholdKwh
+  );
+
+  let runningSavingGBP = priorRunningSavingGBP;
+  const months = monthKeys.map((key) => {
+    const e = monthTotals.get(key);
+    const axleVppProfitGBP = getAxleVppProfitGBP(env, key);
+
+    let savingGBP = null;
+    if (switchSavings && key >= switchSavings.firstSavingsMonthKey) {
+      const coverage = switchSavings.slotCoverageByMonth.get(key);
+      const hypotheticalPence = switchSavings.hypotheticalByMonth.get(key);
+      // Only trust the comparison if every slot that month got priced - a
+      // partial miss (e.g. the old tariff's rates ran out) would otherwise
+      // understate the hypothetical cost and overstate savings.
+      if (coverage && coverage.missing === 0 && hypotheticalPence != null) {
+        savingGBP = round(hypotheticalPence / 100 - e.costGBP, 2);
+        runningSavingGBP = round(runningSavingGBP + savingGBP, 2);
+      }
+    }
+
+    return {
+      month: key,
+      kwh: round(e.kwh, 2),
+      costGBP: round(e.costGBP, 2),
+      offPeakCostGBP: round(e.offPeakCostGBP, 2),
+      onPeakCostGBP: round(e.onPeakCostGBP, 2),
+      standingChargeGBP: round(e.standingChargeGBP, 2),
+      exportProfitGBP: round(e.exportProfitGBP, 2),
+      axleVppProfitGBP: round(axleVppProfitGBP, 2),
+      netCostGBP: round(e.costGBP - e.exportProfitGBP - axleVppProfitGBP, 2),
+      daysWithData: e.daysWithData,
+      estimatedDays: e.estimatedDays,
+      tariffs: e.tariffs,
+      savingGBP,
+      runningSavingGBP: savingGBP != null ? runningSavingGBP : null,
+    };
+  });
+
+  return { breakdown, months, switchSavings, finalRunningSavingGBP: runningSavingGBP };
+}
+
+function switchSavingsDebug(switchSavings) {
+  return switchSavings
+    ? {
+        switchDate: switchSavings.switchDate,
+        baselineTariffCode: switchSavings.baselineTariffCode,
+        firstSavingsMonthKey: switchSavings.firstSavingsMonthKey,
+        coverageByMonth: Object.fromEntries(switchSavings.slotCoverageByMonth),
+      }
+    : null;
+}
+
+// All calendar months before the current one, out of the last HISTORY_MONTHS
+// (default 24, Europe/London). These months are closed and their data never
+// changes again, so the caller can cache this response for a long time and
+// only recompute the (much cheaper) current month on every load.
+export async function computeHistoricalMonths(env) {
+  const notConfigured = checkConfigured(env);
+  if (notConfigured) return notConfigured;
 
   const historyMonths = env.HISTORY_MONTHS ? Number(env.HISTORY_MONTHS) : 24;
-  const monthKeys = getLastNMonthKeys(historyMonths);
+  const allMonthKeys = getLastNMonthKeys(historyMonths);
+  const monthKeys = allMonthKeys.slice(0, -1); // exclude the current (partial) month
+  const { monthStart: rangeEnd } = getCurrentLondonMonthRange();
+
+  if (monthKeys.length === 0) {
+    return json({
+      accountNumber: null,
+      mpan: null,
+      meterSerial: null,
+      months: [],
+      finalRunningSavingGBP: 0,
+      periodFrom: rangeEnd.toISOString(),
+      periodTo: rangeEnd.toISOString(),
+      generatedAt: new Date().toISOString(),
+      debug: {},
+    });
+  }
+
   const rangeStart = monthKeyToLondonRange(monthKeys[0]).start;
-  const { periodEnd: rangeEnd } = getCurrentLondonMonthRange();
 
   try {
-    // Skip per-agreement product-metadata lookups here: a year can span many
-    // more tariff changes than a single month, and each extra lookup is an
-    // extra outbound request - not worth it for a summary view.
-    const breakdown = await computeDailyBreakdown(env, rangeStart, rangeEnd, {
-      includeProductMeta: false,
-    });
-    const { days } = breakdown;
-
-    const monthTotals = new Map();
-    for (const key of monthKeys) {
-      monthTotals.set(key, {
-        kwh: 0,
-        costGBP: 0,
-        offPeakCostGBP: 0,
-        onPeakCostGBP: 0,
-        standingChargeGBP: 0,
-        exportProfitGBP: 0,
-        daysWithData: 0,
-        estimatedDays: 0,
-      });
-    }
-    for (const d of days) {
-      const entry = monthTotals.get(d.date.slice(0, 7));
-      if (!entry) continue;
-      entry.kwh += d.kwh;
-      entry.costGBP += d.costGBP;
-      entry.offPeakCostGBP += d.offPeakCostGBP;
-      entry.onPeakCostGBP += d.onPeakCostGBP;
-      entry.standingChargeGBP += d.standingChargeGBP;
-      entry.exportProfitGBP += d.exportProfitGBP;
-      entry.daysWithData++;
-      if (d.estimated) entry.estimatedDays++;
-    }
-
-    // Which tariff(s) were active each month, since some months may differ.
-    // Look up each distinct product's real display name from Octopus rather
-    // than showing raw codes like "E-1R-IOG-SMB-FIX-12M-26-04-18-A".
-    const allTariffSegments = [
-      ...(breakdown.debug.tariffSegments || []),
-      ...(breakdown.debug.export?.tariffSegments || []),
-    ];
-    const authHeader = "Basic " + btoa(`${apiKey}:`);
-    const uniqueProductCodes = [...new Set(allTariffSegments.map((s) => s.productCode).filter(Boolean))];
-    const displayNames = await fetchProductDisplayNames(uniqueProductCodes, authHeader);
-
-    for (const key of monthKeys) {
-      const { start, end } = monthKeyToLondonRange(key);
-      const effectiveEnd = minDate(end, rangeEnd);
-      const overlapping = allTariffSegments.filter(
-        (s) => new Date(s.segStart) < effectiveEnd && new Date(s.segEnd) > start
-      );
-      monthTotals.get(key).tariffs = [
-        ...new Set(overlapping.map((s) => displayNames.get(s.productCode) || s.tariffCode)),
-      ];
-    }
-
-    // Saving per month since switching to Intelligent Octopus Go (or a
-    // sibling IOG-family tariff), versus what the same real usage would
-    // have cost on whichever tariff was active immediately before.
-    const switchSavings = await computeSwitchSavings(
+    // Skip per-agreement product-metadata lookups here: a multi-year range
+    // can span many more tariff changes than a single month, and each extra
+    // lookup is an extra outbound request - not worth it for a summary view.
+    const { breakdown, months, switchSavings, finalRunningSavingGBP } = await computeMonthsBlock(
       env,
-      breakdown,
-      authHeader,
+      monthKeys,
+      rangeStart,
       rangeEnd,
-      breakdown.debug.evThresholdKwh
+      { includeProductMeta: false }
     );
-
-    let runningSavingGBP = 0;
-    const months = monthKeys.map((key) => {
-      const e = monthTotals.get(key);
-      const axleVppProfitGBP = getAxleVppProfitGBP(env, key);
-
-      let savingGBP = null;
-      if (switchSavings && key >= switchSavings.firstSavingsMonthKey) {
-        const coverage = switchSavings.slotCoverageByMonth.get(key);
-        const hypotheticalPence = switchSavings.hypotheticalByMonth.get(key);
-        // Only trust the comparison if every slot that month got priced -
-        // a partial miss (e.g. the old tariff's rates ran out) would
-        // otherwise understate the hypothetical cost and overstate savings.
-        if (coverage && coverage.missing === 0 && hypotheticalPence != null) {
-          savingGBP = round(hypotheticalPence / 100 - e.costGBP, 2);
-          runningSavingGBP = round(runningSavingGBP + savingGBP, 2);
-        }
-      }
-
-      return {
-        month: key,
-        kwh: round(e.kwh, 2),
-        costGBP: round(e.costGBP, 2),
-        offPeakCostGBP: round(e.offPeakCostGBP, 2),
-        onPeakCostGBP: round(e.onPeakCostGBP, 2),
-        standingChargeGBP: round(e.standingChargeGBP, 2),
-        exportProfitGBP: round(e.exportProfitGBP, 2),
-        axleVppProfitGBP: round(axleVppProfitGBP, 2),
-        netCostGBP: round(e.costGBP - e.exportProfitGBP - axleVppProfitGBP, 2),
-        daysWithData: e.daysWithData,
-        estimatedDays: e.estimatedDays,
-        tariffs: e.tariffs,
-        savingGBP,
-        runningSavingGBP: savingGBP != null ? runningSavingGBP : null,
-      };
-    });
 
     return json({
       accountNumber: breakdown.accountNumber,
       mpan: breakdown.mpan,
       meterSerial: breakdown.meterSerial,
       months,
+      finalRunningSavingGBP,
       periodFrom: rangeStart.toISOString(),
       periodTo: rangeEnd.toISOString(),
       generatedAt: new Date().toISOString(),
-      debug: {
-        ...breakdown.debug,
-        switchSavings: switchSavings
-          ? {
-              switchDate: switchSavings.switchDate,
-              baselineTariffCode: switchSavings.baselineTariffCode,
-              firstSavingsMonthKey: switchSavings.firstSavingsMonthKey,
-              coverageByMonth: Object.fromEntries(switchSavings.slotCoverageByMonth),
-            }
-          : null,
-      },
+      debug: { ...breakdown.debug, switchSavings: switchSavingsDebug(switchSavings) },
+    });
+  } catch (err) {
+    if (err.responseBody) return json(err.responseBody, err.status);
+    return json(
+      { error: "upstream_error", message: err.message || String(err) },
+      err.status || 502
+    );
+  }
+}
+
+// Just the current (still open) calendar month, computed fresh - far cheaper
+// than the historical block since it's one month of consumption/rates
+// instead of up to 24. `priorRunningSavingGBP` is the historical block's
+// running total so far, so this month's runningSavingGBP continues from it.
+export async function computeCurrentMonthHistory(env, priorRunningSavingGBP) {
+  const notConfigured = checkConfigured(env);
+  if (notConfigured) return notConfigured;
+
+  const { monthStart: rangeStart, periodEnd: rangeEnd } = getCurrentLondonMonthRange();
+  const monthKey = londonDateKey(rangeStart).slice(0, 7);
+
+  try {
+    const { breakdown, months, switchSavings, finalRunningSavingGBP } = await computeMonthsBlock(
+      env,
+      [monthKey],
+      rangeStart,
+      rangeEnd,
+      { includeProductMeta: false, priorRunningSavingGBP: priorRunningSavingGBP ?? 0 }
+    );
+
+    return json({
+      accountNumber: breakdown.accountNumber,
+      mpan: breakdown.mpan,
+      meterSerial: breakdown.meterSerial,
+      months,
+      finalRunningSavingGBP,
+      periodFrom: rangeStart.toISOString(),
+      periodTo: rangeEnd.toISOString(),
+      generatedAt: new Date().toISOString(),
+      debug: { ...breakdown.debug, switchSavings: switchSavingsDebug(switchSavings) },
     });
   } catch (err) {
     if (err.responseBody) return json(err.responseBody, err.status);
@@ -588,6 +699,7 @@ async function computeDailyBreakdown(env, rangeStart, rangeEnd, { includeProduct
     mpan,
     meterSerial: serial,
     days,
+    agreements, // raw import-meter agreements, for internal use (e.g. tariff-switch detection) - not serialized to callers
     consumption, // raw slots, for internal use (e.g. tariff-switch savings) - not serialized to callers
     debug: {
       propertyCount: properties.length,
