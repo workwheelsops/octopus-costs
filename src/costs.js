@@ -171,6 +171,10 @@ export async function computeCosts(env) {
     }
 
     const dayMap = new Map(); // londonDateKey -> { kwh, costPence, missingRate }
+    // Debug: kWh summed per half-hour-of-day bucket (London local), across all
+    // days, so a boundary/classification bug shows up as a spike right at the
+    // 23:30 or 05:30 edge rather than being spread evenly through the day.
+    const hourBuckets = Array.from({ length: 48 }, () => ({ kwh: 0, offPeak: null }));
 
     for (const slot of consumption) {
       const kwh = slot.consumption;
@@ -178,6 +182,11 @@ export async function computeCosts(env) {
       const offPeak = isOffPeak(slotInstant, dispatchWindows);
       const rate = lookupRate(slotInstant, rateContext, dispatchWindows);
       const dateKey = londonDateKey(slotInstant);
+
+      const londonMinutes = getLondonMinutesOfDay(slotInstant);
+      const bucketIndex = Math.floor(londonMinutes / 30);
+      hourBuckets[bucketIndex].kwh += kwh;
+      hourBuckets[bucketIndex].offPeak = offPeak;
       const entry =
         dayMap.get(dateKey) ||
         {
@@ -277,6 +286,11 @@ export async function computeCosts(env) {
         sampleRateKeys,
         export: exportDebug,
         dispatches: dispatchDebug,
+        hourBuckets: hourBuckets.map((b, i) => ({
+          time: `${String(Math.floor((i * 30) / 60)).padStart(2, "0")}:${String((i * 30) % 60).padStart(2, "0")}`,
+          kwh: round(b.kwh, 3),
+          offPeak: b.offPeak,
+        })),
       },
     });
   } catch (err) {
@@ -539,6 +553,13 @@ function findActiveRate(records, instant) {
 // "smart charge" dispatch windows on top, which vary night to night -
 // see isOffPeak below, which is what should actually be used for pricing.
 function isStandardOffPeakWindow(date) {
+  const minutesOfDay = getLondonMinutesOfDay(date);
+  const offPeakStart = 23 * 60 + 30;
+  const offPeakEnd = 5 * 60 + 30;
+  return minutesOfDay >= offPeakStart || minutesOfDay < offPeakEnd;
+}
+
+function getLondonMinutesOfDay(date) {
   const parts = new Intl.DateTimeFormat("en-GB", {
     timeZone: "Europe/London",
     hour: "2-digit",
@@ -550,10 +571,7 @@ function isStandardOffPeakWindow(date) {
       acc[p.type] = p.value;
       return acc;
     }, {});
-  const minutesOfDay = (+parts.hour % 24) * 60 + +parts.minute;
-  const offPeakStart = 23 * 60 + 30;
-  const offPeakEnd = 5 * 60 + 30;
-  return minutesOfDay >= offPeakStart || minutesOfDay < offPeakEnd;
+  return (+parts.hour % 24) * 60 + +parts.minute;
 }
 
 // A slot is off-peak if it's within the standard baseline window, OR within
