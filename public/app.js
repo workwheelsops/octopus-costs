@@ -95,6 +95,13 @@ async function main() {
         `Found ${data.debug.dispatches.dispatchesThisMonth} smart-charge dispatch window(s) this month, ` +
         "applied on top of the standard off-peak window.";
     }
+    if (data.debug?.evThresholdReclassifiedSlots) {
+      html +=
+        (html ? "<br><br>" : "") +
+        `Also treated ${data.debug.evThresholdReclassifiedSlots} half-hour slot(s) totalling ` +
+        `${data.debug.evThresholdReclassifiedKwh} kWh as off-peak EV charging (drawing over ` +
+        `${data.debug.evThresholdKwh} kWh/slot outside the standard window).`;
+    }
     statusEl.innerHTML = html;
   }
 }

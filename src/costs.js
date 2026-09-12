@@ -106,6 +106,18 @@ export async function computeCosts(env) {
       periodEnd
     );
 
+    // Intelligent Octopus Go also bills any energy routed through the smart
+    // charging system at the off-peak rate regardless of clock time - both a
+    // session that overruns the guaranteed window to hit its target, and a
+    // manual daytime top-up. There's no clean API field for "this reading was
+    // EV-routed", so approximate it: a half-hour slot using unusually high
+    // power (well above normal appliance baseline) is assumed to be EV
+    // charging. Tune via OCTOPUS_EV_THRESHOLD_KWH if 2 kWh/slot (~4kW) is
+    // wrong for this household's charger/appliances.
+    const evThresholdKwh = env.OCTOPUS_EV_THRESHOLD_KWH
+      ? Number(env.OCTOPUS_EV_THRESHOLD_KWH)
+      : 2;
+
     // Export: many solar accounts have a second, export-only meter point.
     // Auto-detect it and price its consumption (= energy sent to the grid)
     // the same way, to work out export earnings per day.
@@ -146,7 +158,7 @@ export async function computeCosts(env) {
           const kwh = slot.consumption;
           totalExportKwh += kwh;
           const slotInstant = new Date(slot.interval_start);
-          const rate = lookupRate(slotInstant, exportRateContext, dispatchWindows);
+          const rate = lookupRate(slotInstant, kwh, exportRateContext, dispatchWindows, evThresholdKwh);
           if (rate == null) {
             slotsWithNoRate++;
             continue;
@@ -175,12 +187,19 @@ export async function computeCosts(env) {
     // days, so a boundary/classification bug shows up as a spike right at the
     // 23:30 or 05:30 edge rather than being spread evenly through the day.
     const hourBuckets = Array.from({ length: 48 }, () => ({ kwh: 0, offPeak: null }));
+    let evThresholdReclassifiedKwh = 0;
+    let evThresholdReclassifiedSlots = 0;
 
     for (const slot of consumption) {
       const kwh = slot.consumption;
       const slotInstant = new Date(slot.interval_start);
-      const offPeak = isOffPeak(slotInstant, dispatchWindows);
-      const rate = lookupRate(slotInstant, rateContext, dispatchWindows);
+      const standardOffPeak = isStandardOffPeakWindow(slotInstant);
+      const offPeak = isOffPeak(slotInstant, kwh, dispatchWindows, evThresholdKwh);
+      if (offPeak && !standardOffPeak && kwh >= evThresholdKwh) {
+        evThresholdReclassifiedKwh += kwh;
+        evThresholdReclassifiedSlots++;
+      }
+      const rate = lookupRate(slotInstant, kwh, rateContext, dispatchWindows, evThresholdKwh);
       const dateKey = londonDateKey(slotInstant);
 
       const londonMinutes = getLondonMinutesOfDay(slotInstant);
@@ -286,6 +305,9 @@ export async function computeCosts(env) {
         sampleRateKeys,
         export: exportDebug,
         dispatches: dispatchDebug,
+        evThresholdKwh,
+        evThresholdReclassifiedKwh: round(evThresholdReclassifiedKwh, 3),
+        evThresholdReclassifiedSlots,
         hourBuckets: hourBuckets.map((b, i) => ({
           time: `${String(Math.floor((i * 30) / 60)).padStart(2, "0")}:${String((i * 30) % 60).padStart(2, "0")}`,
           kwh: round(b.kwh, 3),
@@ -418,14 +440,16 @@ async function buildRateContext(agreements, monthStart, periodEnd, authHeader) {
 
 // Looks up the rate (pence/kWh inc VAT) for one consumption slot: first the
 // half-hourly rateMap, then the day/night fallback if that misses.
-function lookupRate(slotInstant, rateContext, dispatchWindows) {
+function lookupRate(slotInstant, kwh, rateContext, dispatchWindows, evThresholdKwh) {
   const rate = rateContext.rateMap.get(slotInstant.getTime());
   if (rate != null) return rate;
   const seg = rateContext.dayNightSegments.find(
     (s) => slotInstant >= s.segStart && slotInstant < s.segEnd
   );
   if (!seg) return null;
-  const rates = isOffPeak(slotInstant, dispatchWindows) ? seg.nightRates : seg.dayRates;
+  const rates = isOffPeak(slotInstant, kwh, dispatchWindows, evThresholdKwh)
+    ? seg.nightRates
+    : seg.dayRates;
   return findActiveRate(rates, slotInstant);
 }
 
@@ -574,10 +598,14 @@ function getLondonMinutesOfDay(date) {
   return (+parts.hour % 24) * 60 + +parts.minute;
 }
 
-// A slot is off-peak if it's within the standard baseline window, OR within
-// one of the account's actual smart-charge dispatch windows for that night.
-function isOffPeak(date, dispatchWindows) {
+// A slot is off-peak if it's within the standard baseline window, within one
+// of the account's actual smart-charge dispatch windows for that night, or
+// (heuristically) drawing enough power that it's almost certainly an EV
+// charging session rather than ordinary appliance use - Intelligent Octopus
+// Go bills those at the off-peak rate wherever they fall in the day.
+function isOffPeak(date, kwh, dispatchWindows, evThresholdKwh) {
   if (isStandardOffPeakWindow(date)) return true;
+  if (kwh >= evThresholdKwh) return true;
   return dispatchWindows.some((w) => date >= w.start && date < w.end);
 }
 

@@ -40,6 +40,20 @@ If your account also has a solar export meter point, it's auto-detected
 Override with `OCTOPUS_EXPORT_MPAN` / `OCTOPUS_EXPORT_METER_SERIAL` if
 auto-detection picks the wrong one.
 
+### Intelligent Octopus Go / other smart dual-rate tariffs
+
+For tariffs like Intelligent Octopus Go, off-peak eligibility isn't just the
+advertised clock window (e.g. 23:30–05:30) — Octopus also bills any energy
+routed through the smart charging system at the off-peak rate wherever it
+falls in the day (a session finishing a bit late, or a manual daytime
+top-up). The app fetches the account's actual smart-charge dispatch history
+via Octopus's GraphQL API to catch some of this, and falls back to treating
+any half-hour slot drawing more than `OCTOPUS_EV_THRESHOLD_KWH` (default
+`2`, i.e. roughly 4kW sustained) as off-peak too, since there's no reliable
+API field marking a reading as EV-charging specifically. If this
+misclassifies genuine high-power appliance use in your home (e.g. an
+electric shower or tumble dryer), set `OCTOPUS_EV_THRESHOLD_KWH` higher.
+
 Gas is not included.
 
 ## Prerequisites
