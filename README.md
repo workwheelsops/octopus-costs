@@ -26,8 +26,16 @@ This is an **estimate** — it uses published unit rates/standing charges, not
 your actual bill, so small rounding or billing-period differences are
 possible.
 
-Only the first electricity meter point and first meter on the account are
-used. Gas is not included.
+By default the import (non-export) electricity meter point is used, and the
+most recently listed meter on it — which covers the common case, including
+a solar export meter point existing alongside it. If your account has an
+unusual setup (e.g. a meter exchange where auto-detection picks the wrong
+one), set these optional secrets to pin the exact meter:
+
+- `OCTOPUS_MPAN` — the exact meter point (MPAN) to use.
+- `OCTOPUS_METER_SERIAL` — the exact meter serial number to use.
+
+Gas is not included.
 
 ## Prerequisites
 
@@ -63,6 +71,7 @@ handling `/api/costs` with live reload.
    Secrets** and add these as **secrets** (not plain text variables):
    - `OCTOPUS_API_KEY`
    - `OCTOPUS_ACCOUNT_NUMBER`
+   - `OCTOPUS_MPAN` / `OCTOPUS_METER_SERIAL` (optional, see above)
 4. Redeploy (or trigger a new deployment) so the Worker picks up the
    secrets.
 

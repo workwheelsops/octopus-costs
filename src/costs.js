@@ -33,8 +33,11 @@ export async function computeCosts(env) {
     const property = properties.find((p) => !p.moved_out_at) || properties[0];
     const meterPoints = property?.electricity_meter_points || [];
     // Prefer the import meter point over an export one (e.g. solar export),
-    // since export meter points report energy sent out, not consumed.
-    const meterPoint = meterPoints.find((mp) => !mp.is_export) || meterPoints[0];
+    // since export meter points report energy sent out, not consumed. An
+    // explicit override is available in case a account has an unusual setup.
+    const meterPoint = env.OCTOPUS_MPAN
+      ? meterPoints.find((mp) => mp.mpan === env.OCTOPUS_MPAN)
+      : meterPoints.find((mp) => !mp.is_export) || meterPoints[0];
     if (!meterPoint) {
       return json(
         {
@@ -46,7 +49,16 @@ export async function computeCosts(env) {
     }
 
     const mpan = meterPoint.mpan;
-    const meter = meterPoint.meters?.[0];
+    const meters = meterPoint.meters || [];
+    // If a meter exchange has happened, several meters can be listed for the
+    // same meter point. Allow pinning the exact one via an env var; otherwise
+    // assume the last-listed meter is the current one (Octopus lists them in
+    // installation order).
+    const meter = env.OCTOPUS_METER_SERIAL
+      ? meters.find((m) => m.serial_number === env.OCTOPUS_METER_SERIAL) || {
+          serial_number: env.OCTOPUS_METER_SERIAL,
+        }
+      : meters[meters.length - 1];
     if (!meter) {
       return json(
         { error: "no_meter", message: "No meter found on the electricity meter point." },
@@ -158,6 +170,7 @@ export async function computeCosts(env) {
         propertyCount: properties.length,
         meterPointCount: meterPoints.length,
         meterPointMpans: meterPoints.map((mp) => ({ mpan: mp.mpan, isExport: !!mp.is_export })),
+        metersOnThisMeterPoint: meters.map((m) => m.serial_number),
         agreementCount: agreements.length,
         periodFrom: monthStart.toISOString(),
         periodTo: periodEnd.toISOString(),
