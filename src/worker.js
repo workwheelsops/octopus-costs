@@ -15,19 +15,23 @@ export default {
     }
     if (url.pathname === "/api/history" && request.method === "GET") {
       const forceRefresh = url.searchParams.has("refresh");
-      return withEdgeCache(request, forceRefresh, () => computeHistory(env), HISTORY_CACHE_SECONDS);
+      return withEdgeCache(request, env, forceRefresh, () => computeHistory(env), HISTORY_CACHE_SECONDS);
     }
     return env.ASSETS.fetch(request);
   },
 };
 
-async function withEdgeCache(request, forceRefresh, computeFn, ttlSeconds) {
+async function withEdgeCache(request, env, forceRefresh, computeFn, ttlSeconds) {
   const cache = caches.default;
-  // Cache key ignores query params like ?refresh so a forced refresh also
-  // overwrites the cached copy other requests will hit next.
-  const cacheKey = new Request(new URL(request.url).origin + new URL(request.url).pathname, {
-    method: "GET",
-  });
+  // caches.default is per-datacenter and has no idea the Worker's code
+  // changed between deploys, so a stale response from the previous version
+  // can keep being served from whatever edge location handles a request for
+  // up to ttlSeconds after a fix ships. Fold in the deployment version so
+  // every deploy gets a fresh cache key automatically - old entries are
+  // simply never looked up again rather than needing manual invalidation.
+  const version = env.CF_VERSION_METADATA?.id ?? "dev";
+  const url = new URL(request.url);
+  const cacheKey = new Request(`${url.origin}${url.pathname}?v=${version}`, { method: "GET" });
 
   if (!forceRefresh) {
     const cached = await cache.match(cacheKey);
