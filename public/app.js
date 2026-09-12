@@ -78,7 +78,20 @@ function renderRateDebug(data, estimatedDays) {
       if (s.rateError) bits.push(`rate fetch error: ${s.rateError}`);
       if (s.rateRecordCount != null) bits.push(`${s.rateRecordCount} rate records`);
       if (s.standingChargeError) bits.push(`standing charge fetch error: ${s.standingChargeError}`);
-      return bits.join(", ");
+      let line = bits.join(", ");
+      if (s.rateProbeError) {
+        line += `<br>&nbsp;&nbsp;probe error: ${s.rateProbeError}`;
+      } else if (s.rateProbe) {
+        line +=
+          `<br>&nbsp;&nbsp;probe (no date filter): ${s.rateProbe.totalCountEver ?? "?"} rate record(s) exist in total` +
+          (s.rateProbe.sample.length
+            ? ", most recent: " +
+              s.rateProbe.sample
+                .map((r) => `${r.valid_from}→${r.valid_to} @ ${r.value_inc_vat}p`)
+                .join("; ")
+            : "");
+      }
+      return line;
     })
     .join("<br>");
 

@@ -118,6 +118,28 @@ export async function computeCosts(env) {
         );
         for (const r of rates) rateMap.set(r.valid_from, r.value_inc_vat);
         segmentDebug.rateRecordCount = rates.length;
+
+        if (rates.length === 0) {
+          // No rates matched this date range: probe the endpoint with no date
+          // filter to see whether this tariff has ANY published rates at all,
+          // and if so, what period they actually cover.
+          const probe = await octopusGet(
+            `${OCTOPUS_BASE}/products/${productCode}/electricity-tariffs/${tariffCode}/standard-unit-rates/?page_size=3`,
+            authHeader
+          ).catch((e) => ({ error: e.message }));
+          if (probe?.error) {
+            segmentDebug.rateProbeError = probe.error;
+          } else {
+            segmentDebug.rateProbe = {
+              totalCountEver: probe?.count ?? null,
+              sample: (probe?.results || []).map((r) => ({
+                valid_from: r.valid_from,
+                valid_to: r.valid_to,
+                value_inc_vat: r.value_inc_vat,
+              })),
+            };
+          }
+        }
       } catch (err) {
         segmentDebug.rateError = err.message;
       }
