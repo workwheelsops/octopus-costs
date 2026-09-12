@@ -237,7 +237,9 @@ export async function computeCosts(env) {
       totalOffPeakKwh,
       totalOnPeakKwh,
       totalExportProfitGBP,
-      averageDailyCostGBP: days.length ? round(totalCostPence / 100 / days.length, 2) : 0,
+      averageDailyCostGBP: days.length
+        ? round((totalCostPence / 100 - totalExportProfitGBP) / days.length, 2)
+        : 0,
       monthStart: monthStart.toISOString(),
       generatedAt: new Date().toISOString(),
       debug: {
