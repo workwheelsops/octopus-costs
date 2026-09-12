@@ -49,6 +49,10 @@ async function main() {
   document.getElementById("total-kwh").textContent = `${data.totalKwh.toFixed(1)} kWh`;
   document.getElementById("avg-cost").textContent = gbp.format(data.averageDailyCostGBP);
   document.getElementById("day-count").textContent = data.days.length;
+  document.getElementById("offpeak-cost").textContent = gbp.format(data.totalOffPeakCostGBP ?? 0);
+  document.getElementById("offpeak-kwh").textContent = `${(data.totalOffPeakKwh ?? 0).toFixed(1)} kWh`;
+  document.getElementById("onpeak-cost").textContent = gbp.format(data.totalOnPeakCostGBP ?? 0);
+  document.getElementById("onpeak-kwh").textContent = `${(data.totalOnPeakKwh ?? 0).toFixed(1)} kWh`;
   document.getElementById("summary").hidden = false;
 
   renderChart(data.days);
@@ -151,6 +155,8 @@ function renderTable(days) {
     tr.innerHTML = `
       <td>${dateFormatter.format(new Date(day.date + "T00:00:00"))}</td>
       <td>${day.kwh.toFixed(2)}</td>
+      <td>${gbp.format(day.offPeakCostGBP)}</td>
+      <td>${gbp.format(day.onPeakCostGBP)}</td>
       <td>${gbp.format(day.standingChargeGBP)}</td>
       <td>${gbp.format(day.costGBP)}${day.estimated ? " *" : ""}</td>
     `;

@@ -32,6 +32,16 @@
           <span class="card__label">Days so far</span>
           <span class="card__value" id="day-count">&mdash;</span>
         </div>
+        <div class="card">
+          <span class="card__label">Off-peak cost (23:30&ndash;05:30)</span>
+          <span class="card__value" id="offpeak-cost">&mdash;</span>
+          <span class="card__sub" id="offpeak-kwh"></span>
+        </div>
+        <div class="card">
+          <span class="card__label">Peak cost</span>
+          <span class="card__value" id="onpeak-cost">&mdash;</span>
+          <span class="card__sub" id="onpeak-kwh"></span>
+        </div>
       </section>
 
       <section class="chart-section" id="chart-section" hidden>
@@ -47,6 +57,8 @@
               <tr>
                 <th>Date</th>
                 <th>kWh</th>
+                <th>Off-peak</th>
+                <th>Peak</th>
                 <th>Standing charge</th>
                 <th>Cost</th>
               </tr>

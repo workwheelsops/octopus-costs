@@ -197,19 +197,35 @@ export async function computeCosts(env) {
     for (const slot of consumption) {
       const kwh = slot.consumption;
       const slotInstant = new Date(slot.interval_start);
+      const offPeak = isOffPeakLondonTime(slotInstant);
       let rate = rateMap.get(slot.interval_start);
       if (rate == null) {
         const seg = dayNightSegments.find((s) => slotInstant >= s.segStart && slotInstant < s.segEnd);
         if (seg) {
-          const rates = isOffPeakLondonTime(slotInstant) ? seg.nightRates : seg.dayRates;
+          const rates = offPeak ? seg.nightRates : seg.dayRates;
           rate = findActiveRate(rates, slotInstant);
         }
       }
       const dateKey = londonDateKey(slotInstant);
-      const entry = dayMap.get(dateKey) || { kwh: 0, costPence: 0, missingRate: false };
+      const entry =
+        dayMap.get(dateKey) ||
+        {
+          kwh: 0,
+          costPence: 0,
+          missingRate: false,
+          offPeakKwh: 0,
+          offPeakCostPence: 0,
+          onPeakKwh: 0,
+          onPeakCostPence: 0,
+        };
       entry.kwh += kwh;
+      if (offPeak) entry.offPeakKwh += kwh;
+      else entry.onPeakKwh += kwh;
       if (rate != null) {
-        entry.costPence += kwh * rate;
+        const cost = kwh * rate;
+        entry.costPence += cost;
+        if (offPeak) entry.offPeakCostPence += cost;
+        else entry.onPeakCostPence += cost;
       } else {
         entry.missingRate = true;
       }
@@ -231,11 +247,19 @@ export async function computeCosts(env) {
         kwh: round(e.kwh, 3),
         standingChargeGBP: round(e.standingChargePence / 100, 2),
         costGBP: round(e.costPence / 100, 2),
+        offPeakKwh: round(e.offPeakKwh, 3),
+        offPeakCostGBP: round(e.offPeakCostPence / 100, 2),
+        onPeakKwh: round(e.onPeakKwh, 3),
+        onPeakCostGBP: round(e.onPeakCostPence / 100, 2),
         estimated: e.missingRate,
       }));
 
     const totalCostPence = days.reduce((sum, d) => sum + d.costGBP * 100, 0);
     const totalKwh = days.reduce((sum, d) => sum + d.kwh, 0);
+    const totalOffPeakCostGBP = round(days.reduce((sum, d) => sum + d.offPeakCostGBP, 0), 2);
+    const totalOnPeakCostGBP = round(days.reduce((sum, d) => sum + d.onPeakCostGBP, 0), 2);
+    const totalOffPeakKwh = round(days.reduce((sum, d) => sum + d.offPeakKwh, 0), 2);
+    const totalOnPeakKwh = round(days.reduce((sum, d) => sum + d.onPeakKwh, 0), 2);
 
     const sampleSlot = consumption[0];
     const sampleRateKeys = [...rateMap.keys()].slice(0, 3);
@@ -247,6 +271,10 @@ export async function computeCosts(env) {
       days,
       totalCostGBP: round(totalCostPence / 100, 2),
       totalKwh: round(totalKwh, 2),
+      totalOffPeakCostGBP,
+      totalOnPeakCostGBP,
+      totalOffPeakKwh,
+      totalOnPeakKwh,
       averageDailyCostGBP: days.length ? round(totalCostPence / 100 / days.length, 2) : 0,
       monthStart: monthStart.toISOString(),
       generatedAt: new Date().toISOString(),
