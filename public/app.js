@@ -45,6 +45,19 @@ function dayLabel(y, m, day, withMonth) {
   return `${d.getUTCDate()} ${monthAbbrev}`;
 }
 
+// "2026-05" -> "1 May 2026" - the first full calendar month the running
+// savings total counts from.
+function firstOfMonthLabel(monthKey) {
+  const [y, m] = monthKey.split("-").map(Number);
+  const d = new Date(Date.UTC(y, m - 1, 1));
+  return new Intl.DateTimeFormat("en-GB", {
+    day: "numeric",
+    month: "long",
+    year: "numeric",
+    timeZone: "UTC",
+  }).format(d);
+}
+
 // Derives the design's minimal state shape from the two existing API
 // responses - no backend changes needed, this dashboard just displays a
 // slice of what /api/costs and /api/history already compute.
@@ -74,6 +87,12 @@ function deriveData(costs, history) {
     .slice(-12)
     .map((m) => m.runningSavingGBP);
 
+  const switchSavingsInfo =
+    history.debug?.current?.switchSavings || history.debug?.historical?.switchSavings || null;
+  const savingsSinceLabel = switchSavingsInfo
+    ? firstOfMonthLabel(switchSavingsInfo.firstSavingsMonthKey)
+    : null;
+
   const dailyCosts = [];
   for (let i = 0; i < daysInMonth; i++) {
     if (i < daysElapsed) {
@@ -90,6 +109,7 @@ function deriveData(costs, history) {
     savingsTotal,
     savingsThisMonth,
     savingsByMonth,
+    savingsSinceLabel,
     dailyCosts,
     daysElapsed,
     daysInMonth,
@@ -149,8 +169,11 @@ function renderCaptions(data) {
   document.getElementById("forecast-caption").innerHTML =
     `<strong>${gbp.format(data.spendToDate)}</strong> spent so far`;
   const prefix = data.savingsThisMonth < 0 ? "" : "+";
-  document.getElementById("savings-caption").innerHTML =
-    `<strong>${prefix}${gbp.format(data.savingsThisMonth)}</strong> this month`;
+  let savingsCaption = `<strong>${prefix}${gbp.format(data.savingsThisMonth)}</strong> this month`;
+  if (data.savingsSinceLabel) {
+    savingsCaption += ` · since ${data.savingsSinceLabel}`;
+  }
+  document.getElementById("savings-caption").innerHTML = savingsCaption;
 }
 
 const tooltip = document.getElementById("bar-tooltip");
@@ -290,11 +313,9 @@ function renderMonthlyChart(months) {
     const v = month.netCostGBP;
     const barY = Math.min(y(v), zeroY);
     const barHeight = Math.max(Math.abs(y(v) - zeroY), 1);
-    const label = `${monthFormatter.format(new Date(`${month.month}-01T00:00:00Z`))}: ${gbp.format(v)}`;
     svg +=
       `<rect class="mc-bar${month.daysWithData === 0 ? " is-empty" : ""}" ` +
-      `x="${cx - barWidth / 2}" y="${barY}" width="${barWidth}" height="${barHeight}">` +
-      `<title>${label}</title></rect>`;
+      `x="${cx - barWidth / 2}" y="${barY}" width="${barWidth}" height="${barHeight}"></rect>`;
   });
 
   if (trend) {
@@ -302,7 +323,7 @@ function renderMonthlyChart(months) {
     const x2 = months.length - 1;
     const trendY1 = y(trend.intercept + trend.slope * x1);
     const trendY2 = y(trend.intercept + trend.slope * x2);
-    svg += `<line class="mc-trend" x1="${xCenter(x1)}" y1="${trendY1}" x2="${xCenter(x2)}" y2="${trendY2}"><title>Trend</title></line>`;
+    svg += `<line class="mc-trend" x1="${xCenter(x1)}" y1="${trendY1}" x2="${xCenter(x2)}" y2="${trendY2}"></line>`;
   }
 
   months.forEach((month, i) => {
@@ -312,6 +333,14 @@ function renderMonthlyChart(months) {
 
   svg += `</svg>`;
   container.innerHTML = svg;
+
+  // Wire up the same hover tooltip the daily chart uses - desktop only,
+  // gated inside attachBarTooltip itself.
+  const bars = container.querySelectorAll(".mc-bar");
+  months.forEach((month, i) => {
+    const label = monthFormatter.format(new Date(`${month.month}-01T00:00:00Z`));
+    attachBarTooltip(bars[i], label, month.netCostGBP);
+  });
 }
 
 // Renders a plain-amount cell, en-dash for null (a month with no data or
