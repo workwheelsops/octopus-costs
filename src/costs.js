@@ -1137,7 +1137,7 @@ function getLondonOffsetMinutes(date) {
   return Math.round((asUTC - date.getTime()) / 60000);
 }
 
-function londonWallTimeToUTC(y, m, d, h = 0, mi = 0, s = 0) {
+export function londonWallTimeToUTC(y, m, d, h = 0, mi = 0, s = 0) {
   const utcGuess = Date.UTC(y, m - 1, d, h, mi, s);
   const offsetMinutes = getLondonOffsetMinutes(new Date(utcGuess));
   return new Date(utcGuess - offsetMinutes * 60000);
