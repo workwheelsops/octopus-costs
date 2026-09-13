@@ -62,6 +62,30 @@
         <div class="daily-chart" id="daily-chart"></div>
         <div class="daily-axis" id="daily-axis"></div>
       </section>
+
+      <section class="history-panel">
+        <div class="history-panel__header">
+          <span class="eyebrow">Monthly history</span>
+        </div>
+        <div class="history-table-wrap">
+          <table class="history-table">
+            <thead>
+              <tr>
+                <th class="is-left">Month</th>
+                <th>kWh</th>
+                <th>Cost</th>
+                <th>Export</th>
+                <th>Axle</th>
+                <th>Net cost</th>
+                <th>Saving</th>
+                <th>Running total</th>
+                <th class="is-left">Tariff</th>
+              </tr>
+            </thead>
+            <tbody id="history-table-body"></tbody>
+          </table>
+        </div>
+      </section>
     </main>
 
     <div class="bar-tooltip" id="bar-tooltip" hidden></div>

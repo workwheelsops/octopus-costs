@@ -1,4 +1,5 @@
 const gbp = new Intl.NumberFormat("en-GB", { style: "currency", currency: "GBP" });
+const monthFormatter = new Intl.DateTimeFormat("en-GB", { month: "short", year: "numeric", timeZone: "UTC" });
 const canHoverBars = window.matchMedia("(hover: hover) and (pointer: fine)").matches;
 
 let lastGoodData = null;
@@ -94,6 +95,8 @@ function deriveData(costs, history) {
     daysInMonth,
     monthStart: costs.monthStart,
     updatedAt: costs.generatedAt,
+    // Newest first - a history list reads top-down most-recent-first.
+    historyMonths: [...months].reverse(),
   };
 }
 
@@ -199,6 +202,36 @@ function renderDailyChart(data) {
   renderDailyAxis(data.daysInMonth, y, m);
 }
 
+// Renders a plain-amount cell, en-dash for null (a month with no data or
+// not yet eligible for a saving/running-total comparison), "+" prefix for
+// a positive saving/running-total so it reads as an accumulation.
+function amountCell(value, { signed = false } = {}) {
+  if (value == null) return `<td class="is-muted">–</td>`;
+  const prefix = signed && value >= 0 ? "+" : "";
+  return `<td>${prefix}${gbp.format(value)}</td>`;
+}
+
+function renderHistoryTable(months) {
+  const tbody = document.getElementById("history-table-body");
+  tbody.innerHTML = "";
+  for (const month of months) {
+    const tr = document.createElement("tr");
+    const monthLabel = monthFormatter.format(new Date(`${month.month}-01T00:00:00Z`));
+    const tariffLabel = month.tariffs && month.tariffs.length ? month.tariffs.join(", ") : "–";
+    tr.innerHTML =
+      `<td class="is-left">${monthLabel}</td>` +
+      `<td>${month.daysWithData ? month.kwh.toFixed(1) : "–"}</td>` +
+      `<td>${month.daysWithData ? gbp.format(month.costGBP) : "–"}</td>` +
+      `<td>${month.exportProfitGBP ? gbp.format(month.exportProfitGBP) : "–"}</td>` +
+      `<td>${month.axleVppProfitGBP ? gbp.format(month.axleVppProfitGBP) : "–"}</td>` +
+      `<td>${month.daysWithData ? gbp.format(month.netCostGBP) : "–"}</td>` +
+      amountCell(month.savingGBP, { signed: true }) +
+      amountCell(month.runningSavingGBP) +
+      `<td class="is-left">${tariffLabel}</td>`;
+    tbody.appendChild(tr);
+  }
+}
+
 function renderContext(data) {
   const month = new Intl.DateTimeFormat("en-GB", {
     timeZone: "Europe/London",
@@ -225,6 +258,7 @@ function render(data) {
   renderSparkline(data.savingsByMonth);
   renderCaptions(data);
   renderDailyChart(data);
+  renderHistoryTable(data.historyMonths);
 }
 
 function renderSkeletonBars(containerId, barClass, count, heightPct) {
@@ -246,10 +280,22 @@ function renderSkeletonAxis() {
   }
 }
 
+function renderSkeletonHistoryTable() {
+  const tbody = document.getElementById("history-table-body");
+  tbody.innerHTML = "";
+  for (let i = 0; i < 6; i++) {
+    const tr = document.createElement("tr");
+    tr.className = "is-loading-row";
+    tr.innerHTML = "<td colspan=\"9\">&nbsp;</td>";
+    tbody.appendChild(tr);
+  }
+}
+
 function renderSkeleton() {
   renderSkeletonBars("savings-sparkline", "sparkline__bar", 12, 55);
   renderSkeletonBars("daily-chart", "day-bar", 30, 55);
   renderSkeletonAxis();
+  renderSkeletonHistoryTable();
 }
 
 function showError(message) {
