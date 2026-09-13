@@ -111,6 +111,7 @@ function deriveData(costs, history) {
     savingsByMonth,
     savingsSinceLabel,
     dailyCosts,
+    averageDailyCostGBP: costs.averageDailyCostGBP,
     daysElapsed,
     daysInMonth,
     monthStart: costs.monthStart,
