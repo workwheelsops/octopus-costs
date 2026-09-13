@@ -64,9 +64,11 @@ function firstOfMonthLabel(monthKey) {
 function deriveData(costs, history) {
   const daysElapsed = costs.days.length;
   const daysInMonth = costs.daysInMonth;
-  // Nets off export only (not Axle), matching the netting rule already used
-  // for averageDailyCostGBP - Axle only ever nets into the forecast figure.
-  const spendToDate = round2(costs.totalCostGBP - costs.totalExportProfitGBP);
+  // Nets off both export and Axle profit, same as the forecast and last
+  // month's net cost - so the progress bar (spendToDate / forecast) compares
+  // like with like, and the two stacked captions in this cell aren't netted
+  // differently from each other.
+  const spendToDate = round2(costs.totalCostGBP - costs.totalExportProfitGBP - costs.axleVppProfitGBP);
   const forecast = costs.forecastCostGBP;
 
   const months = history.months || [];
