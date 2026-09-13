@@ -197,34 +197,74 @@ function attachBarTooltip(bar, label, cost) {
   });
 }
 
-function renderDailyAxis(daysInMonth, y, m) {
-  const container = document.getElementById("daily-axis");
-  container.innerHTML = "";
-  const fractions = [0, 0.25, 0.5, 0.75, 1];
-  fractions.forEach((f, i) => {
-    const day = Math.round(f * (daysInMonth - 1)) + 1;
-    const span = document.createElement("span");
-    span.textContent = dayLabel(y, m, day, i === 0 || i === fractions.length - 1);
-    container.appendChild(span);
-  });
-}
-
 function renderDailyChart(data) {
   const container = document.getElementById("daily-chart");
+  container.removeAttribute("style"); // clear any skeleton inline styles
   container.innerHTML = "";
-  const max = Math.max(...data.dailyCosts, 0.01);
   const { y, m } = getLondonYearMonth(data.monthStart);
 
-  data.dailyCosts.forEach((cost, i) => {
+  const width = 900;
+  const height = 200;
+  const margin = { top: 8, right: 8, bottom: 22, left: 46 };
+  const plotWidth = width - margin.left - margin.right;
+  const plotHeight = height - margin.top - margin.bottom;
+
+  const values = data.dailyCosts;
+  const dataMin = Math.min(0, ...values);
+  const dataMax = Math.max(0, ...values, 0.01);
+  const ticks = niceTicks(dataMin, dataMax, 4);
+  const yMin = ticks[0];
+  const yMax = ticks[ticks.length - 1];
+
+  const yScale = (v) => margin.top + plotHeight - ((v - yMin) / (yMax - yMin)) * plotHeight;
+  const zeroY = yScale(0);
+
+  const slotWidth = plotWidth / values.length;
+  const barWidth = Math.min(20, slotWidth * 0.6);
+  const xCenter = (i) => margin.left + slotWidth * i + slotWidth / 2;
+
+  let svg = `<svg viewBox="0 0 ${width} ${height}" xmlns="http://www.w3.org/2000/svg">`;
+
+  for (const tick of ticks) {
+    const ty = yScale(tick);
+    svg +=
+      `<line class="mc-gridline" x1="${margin.left}" x2="${width - margin.right}" y1="${ty}" y2="${ty}"></line>` +
+      `<text class="mc-tick-label" x="${margin.left - 6}" y="${ty + 3}" text-anchor="end">${gbp.format(tick)}</text>`;
+  }
+
+  svg += `<line class="mc-axis" x1="${margin.left}" x2="${width - margin.right}" y1="${zeroY}" y2="${zeroY}"></line>`;
+
+  values.forEach((cost, i) => {
     const isActual = i < data.daysElapsed;
-    const bar = document.createElement("div");
-    bar.className = `day-bar ${isActual ? "is-actual" : "is-forecast"}`;
-    bar.style.height = `${Math.max((cost / max) * 100, 1)}%`;
-    attachBarTooltip(bar, dayLabel(y, m, i + 1, true), cost);
-    container.appendChild(bar);
+    const cx = xCenter(i);
+    const barY = Math.min(yScale(cost), zeroY);
+    const barHeight = Math.max(Math.abs(yScale(cost) - zeroY), 1);
+    svg +=
+      `<rect class="dc-bar${isActual ? "" : " is-forecast"}" ` +
+      `x="${cx - barWidth / 2}" y="${barY}" width="${barWidth}" height="${barHeight}"></rect>`;
   });
 
-  renderDailyAxis(data.daysInMonth, y, m);
+  // Average daily cost - the same figure forecast days are already
+  // projected at, drawn as a reference line so actual days can be read
+  // against it too.
+  const avgY = yScale(data.averageDailyCostGBP);
+  svg += `<line class="dc-average" x1="${margin.left}" y1="${avgY}" x2="${width - margin.right}" y2="${avgY}"></line>`;
+
+  const fractions = [0, 0.25, 0.5, 0.75, 1];
+  fractions.forEach((f, i) => {
+    const day = Math.round(f * (data.daysInMonth - 1)) + 1;
+    const label = dayLabel(y, m, day, i === 0 || i === fractions.length - 1);
+    const anchor = i === 0 ? "start" : i === fractions.length - 1 ? "end" : "middle";
+    svg += `<text class="mc-tick-label" x="${margin.left + plotWidth * f}" y="${height - margin.bottom + 15}" text-anchor="${anchor}">${label}</text>`;
+  });
+
+  svg += `</svg>`;
+  container.innerHTML = svg;
+
+  const bars = container.querySelectorAll(".dc-bar");
+  values.forEach((cost, i) => {
+    attachBarTooltip(bars[i], dayLabel(y, m, i + 1, true), cost);
+  });
 }
 
 // A handful of "nice" round numbers to pick axis ticks from, at each order
@@ -414,22 +454,17 @@ function renderSkeletonBars(containerId, barClass, count, heightPct) {
   }
 }
 
-function renderSkeletonAxis() {
-  const container = document.getElementById("daily-axis");
-  container.innerHTML = "";
-  for (let i = 0; i < 5; i++) {
-    container.appendChild(document.createElement("span"));
-  }
-}
-
-function renderSkeletonMonthlyChart() {
-  const container = document.getElementById("monthly-chart");
+// Shared skeleton for the two SVG bar charts (daily/monthly cost): flat
+// flex-row divs standing in for the real chart until it renders - cleared
+// via container.removeAttribute("style") once the real <svg> goes in.
+function renderSkeletonSvgChart(containerId, count) {
+  const container = document.getElementById(containerId);
   container.innerHTML = "";
   container.style.display = "flex";
   container.style.alignItems = "flex-end";
   container.style.gap = "4px";
   container.style.height = "160px";
-  for (let i = 0; i < 12; i++) {
+  for (let i = 0; i < count; i++) {
     const bar = document.createElement("div");
     bar.style.flex = "1";
     bar.style.height = "55%";
@@ -451,9 +486,8 @@ function renderSkeletonHistoryTable() {
 
 function renderSkeleton() {
   renderSkeletonBars("savings-sparkline", "sparkline__bar", 12, 55);
-  renderSkeletonBars("daily-chart", "day-bar", 30, 55);
-  renderSkeletonAxis();
-  renderSkeletonMonthlyChart();
+  renderSkeletonSvgChart("daily-chart", 30);
+  renderSkeletonSvgChart("monthly-chart", 12);
   renderSkeletonHistoryTable();
 }
 

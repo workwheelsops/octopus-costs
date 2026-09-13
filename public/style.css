@@ -314,36 +314,44 @@ a:hover {
 }
 
 .daily-chart {
-  height: 140px;
-  border-bottom: 1px solid var(--rule-strong);
-  display: flex;
-  align-items: flex-end;
-  gap: 4px;
+  overflow-x: auto;
 }
 
-.day-bar {
-  flex: 1;
-  min-height: 1px;
-  background: var(--purple-100);
+.daily-chart svg {
+  display: block;
+  min-width: 480px;
+  width: 100%;
+  height: auto;
 }
 
-.day-bar.is-actual {
-  background: var(--purple-600);
+.daily-chart text {
+  font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
 }
 
-.day-bar.is-forecast {
-  background: var(--purple-150);
+.dc-bar {
+  fill: var(--purple-600);
+}
+
+.dc-bar.is-forecast {
+  fill: var(--purple-150);
+}
+
+.dc-average {
+  fill: none;
+  stroke: var(--muted);
+  stroke-width: 2;
+  stroke-dasharray: 5 4;
+  stroke-linecap: round;
 }
 
 @media (hover: hover) and (pointer: fine) {
-  .day-bar {
-    transition: background-color 120ms ease-out;
+  .dc-bar {
+    transition: fill 120ms ease-out;
     cursor: default;
   }
 
-  .day-bar.is-actual:hover,
-  .day-bar.is-forecast:hover {
-    background: var(--purple-800);
+  .dc-bar:hover {
+    fill: var(--purple-800);
   }
 
   .mc-bar {
@@ -354,14 +362,6 @@ a:hover {
   .mc-bar:hover {
     fill: var(--purple-800);
   }
-}
-
-.daily-axis {
-  display: flex;
-  justify-content: space-between;
-  margin-top: 7px;
-  font-size: 11px;
-  color: var(--muted);
 }
 
 /* Monthly cost chart */
@@ -634,24 +634,6 @@ a:hover {
   }
 
   .daily-panel__header .legend {
-    display: none;
-  }
-
-  .daily-chart {
-    height: 78px;
-    gap: 2px;
-  }
-
-  .daily-axis {
-    margin-top: 6px;
-    font-size: 10px;
-  }
-
-  /* Mobile only shows 3 axis labels (first/middle/last) out of the 5
-     rendered for desktop - hide the 2nd and 4th rather than maintaining a
-     second markup. */
-  .daily-axis span:nth-child(2),
-  .daily-axis span:nth-child(4) {
     display: none;
   }
 
