@@ -350,6 +350,77 @@ a:hover {
   color: var(--muted);
 }
 
+/* Monthly cost chart */
+.monthly-panel {
+  background: var(--panel);
+  padding: 22px 22px 18px;
+  border-top: 1px solid var(--rule-strong);
+}
+
+.monthly-panel__header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-bottom: 16px;
+}
+
+.monthly-panel__header .eyebrow {
+  margin-bottom: 0;
+}
+
+.legend__swatch--trend {
+  width: 12px;
+  height: 0;
+  border-top: 2px dashed var(--muted);
+  background: none;
+}
+
+.monthly-chart {
+  overflow-x: auto;
+}
+
+.monthly-chart svg {
+  display: block;
+  min-width: 480px;
+  width: 100%;
+  height: auto;
+}
+
+.monthly-chart text {
+  font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
+}
+
+.mc-bar {
+  fill: var(--purple-600);
+}
+
+.mc-bar.is-empty {
+  fill: var(--purple-150);
+}
+
+.mc-trend {
+  fill: none;
+  stroke: var(--muted);
+  stroke-width: 2;
+  stroke-dasharray: 5 4;
+  stroke-linecap: round;
+}
+
+.mc-gridline {
+  stroke: var(--rule-soft);
+  stroke-width: 1;
+}
+
+.mc-axis {
+  stroke: var(--rule-strong);
+  stroke-width: 1;
+}
+
+.mc-tick-label {
+  fill: var(--muted);
+  font-size: 11px;
+}
+
 /* Monthly history */
 .history-panel {
   background: var(--panel);
@@ -567,6 +638,18 @@ a:hover {
      second markup. */
   .daily-axis span:nth-child(2),
   .daily-axis span:nth-child(4) {
+    display: none;
+  }
+
+  .monthly-panel {
+    padding: 18px 16px 16px;
+  }
+
+  .monthly-panel__header {
+    margin-bottom: 12px;
+  }
+
+  .monthly-panel__header .legend {
     display: none;
   }
 

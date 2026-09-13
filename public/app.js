@@ -97,6 +97,8 @@ function deriveData(costs, history) {
     updatedAt: costs.generatedAt,
     // Newest first - a history list reads top-down most-recent-first.
     historyMonths: [...months].reverse(),
+    // Oldest first, capped to 12 - a chart reads left-to-right chronologically.
+    monthlyChartMonths: months.slice(-12),
   };
 }
 
@@ -202,6 +204,116 @@ function renderDailyChart(data) {
   renderDailyAxis(data.daysInMonth, y, m);
 }
 
+// A handful of "nice" round numbers to pick axis ticks from, at each order
+// of magnitude - keeps gridline labels like £20/£40 instead of £23.7/£47.4.
+function niceTicks(min, max, targetCount) {
+  if (min === max) {
+    min = Math.min(0, min);
+    max = max === 0 ? 1 : max;
+  }
+  const range = max - min;
+  const roughStep = range / targetCount;
+  const magnitude = 10 ** Math.floor(Math.log10(roughStep));
+  const residual = roughStep / magnitude;
+  const step = (residual > 5 ? 10 : residual > 2 ? 5 : residual > 1 ? 2 : 1) * magnitude;
+
+  const niceMin = Math.floor(min / step) * step;
+  const niceMax = Math.ceil(max / step) * step;
+  const ticks = [];
+  for (let v = niceMin; v <= niceMax + step / 2; v += step) ticks.push(Math.round(v * 100) / 100);
+  return ticks;
+}
+
+// Least-squares fit over whatever { x, y } points are given - used to draw a
+// trend line through months that actually have data, skipping any zero
+// months before the account existed so they don't drag the line down.
+function linearRegression(points) {
+  const n = points.length;
+  if (n < 2) return null;
+  const xMean = points.reduce((s, p) => s + p.x, 0) / n;
+  const yMean = points.reduce((s, p) => s + p.y, 0) / n;
+  let num = 0;
+  let den = 0;
+  for (const p of points) {
+    num += (p.x - xMean) * (p.y - yMean);
+    den += (p.x - xMean) ** 2;
+  }
+  if (den === 0) return null;
+  const slope = num / den;
+  return { slope, intercept: yMean - slope * xMean };
+}
+
+function renderMonthlyChart(months) {
+  const container = document.getElementById("monthly-chart");
+  container.removeAttribute("style"); // clear any skeleton inline styles
+  container.innerHTML = "";
+  if (months.length === 0) return;
+
+  const width = 900;
+  const height = 200;
+  const margin = { top: 8, right: 8, bottom: 22, left: 46 };
+  const plotWidth = width - margin.left - margin.right;
+  const plotHeight = height - margin.top - margin.bottom;
+
+  const values = months.map((m) => m.netCostGBP);
+  const dataMin = Math.min(0, ...values);
+  const dataMax = Math.max(0, ...values, 0.01);
+  const ticks = niceTicks(dataMin, dataMax, 4);
+  const yMin = ticks[0];
+  const yMax = ticks[ticks.length - 1];
+
+  const y = (v) => margin.top + plotHeight - ((v - yMin) / (yMax - yMin)) * plotHeight;
+  const zeroY = y(0);
+
+  const slotWidth = plotWidth / months.length;
+  const barWidth = Math.min(36, slotWidth * 0.55);
+  const xCenter = (i) => margin.left + slotWidth * i + slotWidth / 2;
+
+  const trendPoints = months
+    .map((m, i) => ({ x: i, y: m.netCostGBP, hasData: m.daysWithData > 0 }))
+    .filter((p) => p.hasData);
+  const trend = linearRegression(trendPoints);
+
+  let svg = `<svg viewBox="0 0 ${width} ${height}" xmlns="http://www.w3.org/2000/svg">`;
+
+  for (const tick of ticks) {
+    const ty = y(tick);
+    svg +=
+      `<line class="mc-gridline" x1="${margin.left}" x2="${width - margin.right}" y1="${ty}" y2="${ty}"></line>` +
+      `<text class="mc-tick-label" x="${margin.left - 6}" y="${ty + 3}" text-anchor="end">${gbp.format(tick)}</text>`;
+  }
+
+  svg += `<line class="mc-axis" x1="${margin.left}" x2="${width - margin.right}" y1="${zeroY}" y2="${zeroY}"></line>`;
+
+  months.forEach((month, i) => {
+    const cx = xCenter(i);
+    const v = month.netCostGBP;
+    const barY = Math.min(y(v), zeroY);
+    const barHeight = Math.max(Math.abs(y(v) - zeroY), 1);
+    const label = `${monthFormatter.format(new Date(`${month.month}-01T00:00:00Z`))}: ${gbp.format(v)}`;
+    svg +=
+      `<rect class="mc-bar${month.daysWithData === 0 ? " is-empty" : ""}" ` +
+      `x="${cx - barWidth / 2}" y="${barY}" width="${barWidth}" height="${barHeight}">` +
+      `<title>${label}</title></rect>`;
+  });
+
+  if (trend) {
+    const x1 = 0;
+    const x2 = months.length - 1;
+    const trendY1 = y(trend.intercept + trend.slope * x1);
+    const trendY2 = y(trend.intercept + trend.slope * x2);
+    svg += `<line class="mc-trend" x1="${xCenter(x1)}" y1="${trendY1}" x2="${xCenter(x2)}" y2="${trendY2}"><title>Trend</title></line>`;
+  }
+
+  months.forEach((month, i) => {
+    const label = monthFormatter.format(new Date(`${month.month}-01T00:00:00Z`)).split(" ")[0];
+    svg += `<text class="mc-tick-label" x="${xCenter(i)}" y="${height - margin.bottom + 15}" text-anchor="middle">${label}</text>`;
+  });
+
+  svg += `</svg>`;
+  container.innerHTML = svg;
+}
+
 // Renders a plain-amount cell, en-dash for null (a month with no data or
 // not yet eligible for a saving/running-total comparison), "+" prefix for
 // a positive saving/running-total so it reads as an accumulation.
@@ -258,6 +370,7 @@ function render(data) {
   renderSparkline(data.savingsByMonth);
   renderCaptions(data);
   renderDailyChart(data);
+  renderMonthlyChart(data.monthlyChartMonths);
   renderHistoryTable(data.historyMonths);
 }
 
@@ -280,6 +393,22 @@ function renderSkeletonAxis() {
   }
 }
 
+function renderSkeletonMonthlyChart() {
+  const container = document.getElementById("monthly-chart");
+  container.innerHTML = "";
+  container.style.display = "flex";
+  container.style.alignItems = "flex-end";
+  container.style.gap = "4px";
+  container.style.height = "160px";
+  for (let i = 0; i < 12; i++) {
+    const bar = document.createElement("div");
+    bar.style.flex = "1";
+    bar.style.height = "55%";
+    bar.style.background = "var(--purple-100)";
+    container.appendChild(bar);
+  }
+}
+
 function renderSkeletonHistoryTable() {
   const tbody = document.getElementById("history-table-body");
   tbody.innerHTML = "";
@@ -295,6 +424,7 @@ function renderSkeleton() {
   renderSkeletonBars("savings-sparkline", "sparkline__bar", 12, 55);
   renderSkeletonBars("daily-chart", "day-bar", 30, 55);
   renderSkeletonAxis();
+  renderSkeletonMonthlyChart();
   renderSkeletonHistoryTable();
 }
 
