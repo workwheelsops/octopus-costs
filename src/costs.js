@@ -49,11 +49,12 @@ export async function computeCosts(env) {
       ? round((totalCostPence / 100 - totalExportProfitGBP) / days.length, 2)
       : 0;
     const daysInMonth = getDaysInLondonMonth(monthStart);
-    // The forecast additionally nets off Axle VPP profit (assumes this
-    // month's income so far continues at the same daily rate for the rest
-    // of the month, same as the electricity side of the projection).
-    const axleVppProfitPerDay = days.length ? axleVppProfitGBP / days.length : 0;
-    const forecastCostGBP = round((averageDailyCostGBP - axleVppProfitPerDay) * daysInMonth, 2);
+    // The forecast is estimated from electricity alone first, then Axle VPP
+    // profit entered for the month is subtracted once as a flat amount -
+    // not extrapolated to a daily rate, since Axle income isn't assumed to
+    // accrue evenly through the month the way electricity cost is.
+    const electricityForecastGBP = round(averageDailyCostGBP * daysInMonth, 2);
+    const forecastCostGBP = round(electricityForecastGBP - axleVppProfitGBP, 2);
 
     return json({
       accountNumber: breakdown.accountNumber,
