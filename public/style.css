@@ -7,6 +7,7 @@
   --border: #e4e2dd;
   --accent: #4b3ad1;
   --accent-soft: #ece9fb;
+  --peak: #eb6834;
   --danger: #b3261e;
   --danger-soft: #fbe9e7;
 }
@@ -20,6 +21,7 @@
     --border: #2d2f38;
     --accent: #9c8ff2;
     --accent-soft: #2a2650;
+    --peak: #d95926;
     --danger: #ff8a80;
     --danger-soft: #3a2020;
   }
@@ -117,6 +119,41 @@ body {
   margin: 0 0 12px;
 }
 
+.chart-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+  margin: 0 0 10px;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+.chart-legend__item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.chart-legend__swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  display: inline-block;
+}
+
+.chart-legend__swatch--offpeak {
+  background: var(--accent);
+}
+
+.chart-legend__swatch--peak {
+  background: var(--peak);
+}
+
+.chart-legend__swatch--standing {
+  background: var(--text-muted);
+  opacity: 0.55;
+}
+
 .chart {
   background: var(--surface);
   border: 1px solid var(--border);
@@ -150,6 +187,32 @@ body {
 .chart__bar-fill.is-estimated {
   background: var(--accent-soft);
   border: 1px dashed var(--accent);
+}
+
+.chart__bar-stack {
+  width: 100%;
+  min-height: 2px;
+  display: flex;
+  flex-direction: column-reverse;
+}
+
+.chart__bar-stack.is-estimated {
+  opacity: 0.65;
+  border: 1px dashed var(--text-muted);
+}
+
+.chart__bar-segment--offpeak {
+  background: var(--accent);
+}
+
+.chart__bar-segment--peak {
+  background: var(--peak);
+}
+
+.chart__bar-segment--standing {
+  background: var(--text-muted);
+  opacity: 0.55;
+  border-radius: 3px 3px 0 0;
 }
 
 .chart__bar-label {

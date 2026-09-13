@@ -161,6 +161,16 @@ function renderRateDebug(data, estimatedDays) {
   );
 }
 
+function chartSegment(pence, modifierClass) {
+  const seg = document.createElement("div");
+  seg.className = "chart__bar-segment " + modifierClass;
+  // flex-grow proportional to this segment's share of the day's total cost -
+  // the three segments then auto-divide the stack's height between them.
+  seg.style.flexGrow = String(Math.max(pence, 0));
+  seg.style.flexBasis = "0";
+  return seg;
+}
+
 function renderChart(days) {
   const chart = document.getElementById("chart");
   chart.innerHTML = "";
@@ -170,17 +180,24 @@ function renderChart(days) {
     const bar = document.createElement("div");
     bar.className = "chart__bar";
 
-    const fill = document.createElement("div");
-    fill.className = "chart__bar-fill" + (day.estimated ? " is-estimated" : "");
+    const stack = document.createElement("div");
+    stack.className = "chart__bar-stack" + (day.estimated ? " is-estimated" : "");
     const heightPct = Math.max((day.costGBP / maxCost) * 100, 1);
-    fill.style.height = `${heightPct}%`;
-    fill.title = `${day.date}: ${gbp.format(day.costGBP)}`;
+    stack.style.height = `${heightPct}%`;
+    stack.title =
+      `${day.date}: ${gbp.format(day.costGBP)} total ` +
+      `(off-peak ${gbp.format(day.offPeakCostGBP)}, peak ${gbp.format(day.onPeakCostGBP)}, ` +
+      `standing ${gbp.format(day.standingChargeGBP)})`;
+
+    stack.appendChild(chartSegment(day.offPeakCostGBP * 100, "chart__bar-segment--offpeak"));
+    stack.appendChild(chartSegment(day.onPeakCostGBP * 100, "chart__bar-segment--peak"));
+    stack.appendChild(chartSegment(day.standingChargeGBP * 100, "chart__bar-segment--standing"));
 
     const label = document.createElement("span");
     label.className = "chart__bar-label";
     label.textContent = String(new Date(day.date + "T00:00:00").getDate());
 
-    bar.appendChild(fill);
+    bar.appendChild(stack);
     bar.appendChild(label);
     chart.appendChild(bar);
   }

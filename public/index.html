@@ -57,7 +57,12 @@
 
       <section class="chart-section" id="chart-section" hidden>
         <h2>Daily cost</h2>
-        <div id="chart" class="chart" role="img" aria-label="Daily electricity cost bar chart"></div>
+        <div class="chart-legend">
+          <span class="chart-legend__item"><span class="chart-legend__swatch chart-legend__swatch--offpeak"></span>Off-peak</span>
+          <span class="chart-legend__item"><span class="chart-legend__swatch chart-legend__swatch--peak"></span>Peak</span>
+          <span class="chart-legend__item"><span class="chart-legend__swatch chart-legend__swatch--standing"></span>Standing charge</span>
+        </div>
+        <div id="chart" class="chart" role="img" aria-label="Daily electricity cost bar chart, split into off-peak, peak, and standing charge"></div>
       </section>
 
       <section class="table-section" id="table-section" hidden>
