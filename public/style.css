@@ -63,6 +63,8 @@ a:hover {
   display: flex;
   align-items: center;
   gap: 10px;
+  min-width: 0;
+  flex: 1 1 auto;
 }
 
 .brand-mark {
@@ -82,10 +84,12 @@ a:hover {
 .brand-word {
   font-size: 14px;
   font-weight: 700;
-  letter-spacing: 0.11em;
-  text-transform: uppercase;
+  letter-spacing: 0.02em;
   color: #fff;
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
 }
 
 .refresh-btn {
@@ -98,6 +102,7 @@ a:hover {
   font-family: inherit;
   cursor: pointer;
   transition: opacity 120ms ease-out;
+  flex-shrink: 0;
 }
 
 .refresh-btn.is-busy {
@@ -340,6 +345,15 @@ a:hover {
   .day-bar.is-forecast:hover {
     background: var(--purple-800);
   }
+
+  .mc-bar {
+    transition: fill 120ms ease-out;
+    cursor: default;
+  }
+
+  .mc-bar:hover {
+    fill: var(--purple-800);
+  }
 }
 
 .daily-axis {
@@ -534,8 +548,8 @@ a:hover {
   }
 
   .brand-word {
-    font-size: 12px;
-    letter-spacing: 0.1em;
+    font-size: 11px;
+    letter-spacing: 0.01em;
   }
 
   .refresh-btn {
