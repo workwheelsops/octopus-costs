@@ -93,6 +93,12 @@ function deriveData(costs, history) {
     ? firstOfMonthLabel(switchSavingsInfo.firstSavingsMonthKey)
     : null;
 
+  // The month before the current one - null if there's less than a full
+  // month of history yet (a brand new account).
+  const lastMonthEntry = months.length >= 2 ? months[months.length - 2] : null;
+  const lastMonthNetCostGBP =
+    lastMonthEntry && lastMonthEntry.daysWithData > 0 ? lastMonthEntry.netCostGBP : null;
+
   const dailyCosts = [];
   for (let i = 0; i < daysInMonth; i++) {
     if (i < daysElapsed) {
@@ -112,6 +118,7 @@ function deriveData(costs, history) {
     savingsSinceLabel,
     dailyCosts,
     averageDailyCostGBP: costs.averageDailyCostGBP,
+    lastMonthNetCostGBP,
     daysElapsed,
     daysInMonth,
     monthStart: costs.monthStart,
@@ -169,6 +176,14 @@ function renderSparkline(savingsByMonth) {
 function renderCaptions(data) {
   document.getElementById("forecast-caption").innerHTML =
     `<strong>${gbp.format(data.spendToDate)}</strong> spent so far`;
+
+  const lastMonthEl = document.getElementById("last-month-caption");
+  if (data.lastMonthNetCostGBP != null) {
+    lastMonthEl.innerHTML = `<strong>${gbp.format(data.lastMonthNetCostGBP)}</strong> last month`;
+  } else {
+    lastMonthEl.innerHTML = "&nbsp;";
+  }
+
   const prefix = data.savingsThisMonth < 0 ? "" : "+";
   let savingsCaption = `<strong>${prefix}${gbp.format(data.savingsThisMonth)}</strong> this month`;
   if (data.savingsSinceLabel) {
