@@ -1,10 +1,9 @@
 # Octopus Costs
 
-A small dashboard that shows your Octopus Energy electricity spend for the
-current calendar month: total cost so far, total kWh used, average daily
-cost, and a day-by-day breakdown/chart — plus a monthly cost history going
-back 24 months, so you can compare month to month even across tariff
-changes.
+A glance dashboard for your Octopus Energy electricity spend, answering
+exactly three questions: this month's forecast cost, your running total
+savings since switching tariff, and the daily cost trend for the current
+month (actual so far, projected for the rest).
 
 It's a Cloudflare Worker with static assets: a static frontend
 (`public/index.html` / `public/style.css` / `public/app.js`) served

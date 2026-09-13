@@ -7,117 +7,64 @@
     <link rel="stylesheet" href="style.css" />
   </head>
   <body>
-    <main class="page">
-      <header class="page__header">
-        <h1>Octopus Costs</h1>
-        <p class="subtitle" id="subtitle">Electricity spend for this month</p>
+    <main class="dashboard" id="dashboard">
+      <header class="brand-bar">
+        <div class="brand-bar__left">
+          <span class="brand-mark">O</span>
+          <span class="brand-word">Octopus Costs</span>
+        </div>
+        <button type="button" class="refresh-btn" id="refresh-btn">Refresh</button>
       </header>
 
-      <section id="status" class="status" hidden></section>
+      <div class="context-strip">
+        <span class="context-strip__month" id="context-month">&nbsp;</span>
+        <span class="context-strip__meta" id="context-meta">&nbsp;</span>
+      </div>
 
-      <section class="summary" id="summary" hidden>
-        <div class="card">
-          <span class="card__label">Total Import Cost this month so far</span>
-          <span class="card__value" id="total-cost">&mdash;</span>
+      <p class="error-line" id="error-line" hidden></p>
+
+      <div class="hero-row" id="hero-row">
+        <section class="hero-cell">
+          <div class="eyebrow">Forecast this month</div>
+          <div class="figure figure--forecast">
+            <span class="figure__sign" id="forecast-sign"></span>
+            <span class="figure__currency is-loading" id="forecast-currency">&pound;</span>
+            <span class="figure__pounds is-loading" id="forecast-pounds">&nbsp;</span>
+            <span class="figure__pence is-loading" id="forecast-pence">&nbsp;</span>
+          </div>
+          <div class="progress">
+            <div class="progress__fill" id="forecast-progress-fill"></div>
+          </div>
+          <div class="caption" id="forecast-caption">&nbsp;</div>
+        </section>
+
+        <section class="hero-cell">
+          <div class="eyebrow">Running total savings</div>
+          <div class="figure figure--savings">
+            <span class="figure__sign" id="savings-sign"></span>
+            <span class="figure__currency is-loading" id="savings-currency">&pound;</span>
+            <span class="figure__pounds is-loading" id="savings-pounds">&nbsp;</span>
+            <span class="figure__pence is-loading" id="savings-pence">&nbsp;</span>
+          </div>
+          <div class="sparkline" id="savings-sparkline"></div>
+          <div class="caption" id="savings-caption">&nbsp;</div>
+        </section>
+      </div>
+
+      <section class="daily-panel">
+        <div class="daily-panel__header">
+          <span class="eyebrow">Cost per day</span>
+          <div class="legend">
+            <span class="legend__item"><span class="legend__swatch legend__swatch--actual"></span>Actual</span>
+            <span class="legend__item"><span class="legend__swatch legend__swatch--forecast"></span>Forecast</span>
+          </div>
         </div>
-        <div class="card">
-          <span class="card__label">Average daily cost (net of export)</span>
-          <span class="card__value" id="avg-cost">&mdash;</span>
-        </div>
-        <div class="card">
-          <span class="card__label">Forecast this month</span>
-          <span class="card__value" id="forecast-cost">&mdash;</span>
-          <span class="card__sub" id="forecast-sub"></span>
-        </div>
-        <div class="card" id="running-saving-card" hidden>
-          <span class="card__label">Running total savings</span>
-          <span class="card__value" id="running-saving">&mdash;</span>
-          <span class="card__sub">vs tariff before Intelligent Octopus Go</span>
-        </div>
-        <div class="card">
-          <span class="card__label">Off-peak cost (23:30&ndash;05:30)</span>
-          <span class="card__value" id="offpeak-cost">&mdash;</span>
-          <span class="card__sub" id="offpeak-kwh"></span>
-        </div>
-        <div class="card">
-          <span class="card__label">Peak cost</span>
-          <span class="card__value" id="onpeak-cost">&mdash;</span>
-          <span class="card__sub" id="onpeak-kwh"></span>
-        </div>
-        <div class="card" id="export-card" hidden>
-          <span class="card__label">Total Export Profit this month so far</span>
-          <span class="card__value" id="export-profit">&mdash;</span>
-        </div>
-        <div class="card" id="axle-card" hidden>
-          <span class="card__label">Axle VPP profit</span>
-          <span class="card__value" id="axle-profit">&mdash;</span>
-          <span class="card__sub">entered manually</span>
-        </div>
+        <div class="daily-chart" id="daily-chart"></div>
+        <div class="daily-axis" id="daily-axis"></div>
       </section>
-
-      <section class="chart-section" id="chart-section" hidden>
-        <h2>Daily cost</h2>
-        <div class="chart-legend">
-          <span class="chart-legend__item"><span class="chart-legend__swatch chart-legend__swatch--offpeak"></span>Off-peak</span>
-          <span class="chart-legend__item"><span class="chart-legend__swatch chart-legend__swatch--peak"></span>Peak</span>
-          <span class="chart-legend__item"><span class="chart-legend__swatch chart-legend__swatch--standing"></span>Standing charge</span>
-        </div>
-        <div id="chart" class="chart" role="img" aria-label="Daily electricity cost bar chart, split into off-peak, peak, and standing charge"></div>
-      </section>
-
-      <section class="table-section" id="table-section" hidden>
-        <h2>Daily breakdown</h2>
-        <div class="table-wrap">
-          <table id="days-table">
-            <thead>
-              <tr>
-                <th>Date</th>
-                <th>kWh</th>
-                <th>Off-peak</th>
-                <th>Peak</th>
-                <th>Standing charge</th>
-                <th>Cost</th>
-                <th id="export-header" hidden>Export profit</th>
-              </tr>
-            </thead>
-            <tbody></tbody>
-          </table>
-        </div>
-      </section>
-
-      <section class="chart-section" id="history-chart-section" hidden>
-        <h2>Cost history</h2>
-        <p class="card__sub">Net cost per month, last 12 months, with trend</p>
-        <div id="history-chart" class="history-chart" role="img" aria-label="Monthly net electricity cost bar chart with trend line, last 12 months"></div>
-        <p class="card__sub" id="history-cache-note"></p>
-      </section>
-
-      <section class="table-section" id="history-table-section" hidden>
-        <div class="table-wrap">
-          <table id="history-table">
-            <thead>
-              <tr>
-                <th>Month</th>
-                <th>kWh</th>
-                <th>Cost</th>
-                <th>Export profit</th>
-                <th>Axle VPP</th>
-                <th>Net cost</th>
-                <th id="saving-header" hidden>Saving vs old tariff</th>
-                <th id="running-saving-header" hidden>Running total</th>
-                <th>Tariff</th>
-              </tr>
-            </thead>
-            <tbody></tbody>
-          </table>
-        </div>
-      </section>
-
-      <footer class="page__footer" id="footer" hidden>
-        Last updated <span id="generated-at">&mdash;</span>. Costs are estimated from published
-        Octopus unit rates and standing charges; they may differ slightly from your final bill.
-      </footer>
     </main>
+
+    <div class="bar-tooltip" id="bar-tooltip" hidden></div>
 
     <script src="app.js"></script>
   </body>
