@@ -195,6 +195,7 @@ function renderCaptions(data) {
 }
 
 const tooltip = document.getElementById("bar-tooltip");
+let tappedBar = null;
 
 function positionTooltip(bar) {
   const rect = bar.getBoundingClientRect();
@@ -202,20 +203,50 @@ function positionTooltip(bar) {
   tooltip.style.top = `${rect.top - 6}px`;
 }
 
+function showTooltip(bar, label, cost) {
+  tooltip.textContent = `${label} — ${gbp.format(cost)}`;
+  tooltip.hidden = false;
+  positionTooltip(bar);
+}
+
+function hideTappedTooltip() {
+  if (!tappedBar) return;
+  tappedBar.style.fill = "";
+  tappedBar = null;
+  tooltip.hidden = true;
+}
+
+// Dismiss a tapped tooltip when tapping anywhere else on the page - bars'
+// own click handler stops propagation, so this only fires for taps outside
+// the chart.
+document.addEventListener("click", hideTappedTooltip);
+
 function attachBarTooltip(bar, label, cost) {
-  if (!canHoverBars) return;
-  bar.addEventListener("mouseenter", () => {
-    tooltip.textContent = `${label} — ${gbp.format(cost)}`;
-    tooltip.hidden = false;
-    positionTooltip(bar);
-  });
-  bar.addEventListener("mousemove", () => positionTooltip(bar));
-  bar.addEventListener("mouseleave", () => {
-    tooltip.hidden = true;
+  if (canHoverBars) {
+    bar.addEventListener("mouseenter", () => showTooltip(bar, label, cost));
+    bar.addEventListener("mousemove", () => positionTooltip(bar));
+    bar.addEventListener("mouseleave", () => {
+      tooltip.hidden = true;
+    });
+  }
+
+  // Tap support (mobile, and anyone else without hover) - since there's no
+  // hover to show/hide the tooltip automatically, tapping a bar toggles it,
+  // darkening the bar the same way desktop hover does.
+  bar.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const wasThisBar = tappedBar === bar;
+    hideTappedTooltip();
+    if (!wasThisBar) {
+      tappedBar = bar;
+      bar.style.fill = "var(--purple-800)";
+      showTooltip(bar, label, cost);
+    }
   });
 }
 
 function renderDailyChart(data) {
+  hideTappedTooltip(); // avoid a stale reference into the chart we're about to replace
   const container = document.getElementById("daily-chart");
   container.removeAttribute("style"); // clear any skeleton inline styles
   container.innerHTML = "";
@@ -325,6 +356,7 @@ function linearRegression(points) {
 }
 
 function renderMonthlyChart(months) {
+  hideTappedTooltip(); // avoid a stale reference into the chart we're about to replace
   const container = document.getElementById("monthly-chart");
   container.removeAttribute("style"); // clear any skeleton inline styles
   container.innerHTML = "";
