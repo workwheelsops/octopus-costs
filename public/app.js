@@ -265,34 +265,134 @@ async function loadHistory(forceRefresh) {
 function showHistoryError(message) {
   const el = document.getElementById("history-chart-section");
   el.hidden = false;
-  el.innerHTML = `<h2>Last 24 months</h2><p class="status">${message}</p>`;
+  el.innerHTML = `<h2>Cost history</h2><p class="status">${message}</p>`;
 }
 
-function renderHistoryChart(months) {
-  const chart = document.getElementById("history-chart");
-  chart.innerHTML = "";
-  const maxCost = Math.max(...months.map((m) => m.netCostGBP), 0.01);
-
-  for (const month of months) {
-    const bar = document.createElement("div");
-    bar.className = "chart__bar";
-
-    const fill = document.createElement("div");
-    fill.className = "chart__bar-fill" + (month.daysWithData === 0 ? " is-estimated" : "");
-    const heightPct = Math.max((month.netCostGBP / maxCost) * 100, 1);
-    fill.style.height = `${heightPct}%`;
-    fill.title = `${monthFormatter.format(new Date(month.month + "-01T00:00:00"))}: ${gbp.format(
-      month.netCostGBP
-    )}`;
-
-    const label = document.createElement("span");
-    label.className = "chart__bar-label";
-    label.textContent = monthFormatter.format(new Date(month.month + "-01T00:00:00")).split(" ")[0];
-
-    bar.appendChild(fill);
-    bar.appendChild(label);
-    chart.appendChild(bar);
+// A handful of "nice" round numbers to pick axis ticks from, at each order of
+// magnitude - keeps gridline labels like £20/£40 instead of £23.7/£47.4.
+function niceTicks(min, max, targetCount) {
+  if (min === max) {
+    min = Math.min(0, min);
+    max = max === 0 ? 1 : max;
   }
+  const range = max - min;
+  const roughStep = range / targetCount;
+  const magnitude = 10 ** Math.floor(Math.log10(roughStep));
+  const residual = roughStep / magnitude;
+  const step = (residual > 5 ? 10 : residual > 2 ? 5 : residual > 1 ? 2 : 1) * magnitude;
+
+  const niceMin = Math.floor(min / step) * step;
+  const niceMax = Math.ceil(max / step) * step;
+  const ticks = [];
+  for (let v = niceMin; v <= niceMax + step / 2; v += step) ticks.push(Math.round(v * 100) / 100);
+  return ticks;
+}
+
+// Least-squares fit over whatever { x, y } points are given - used to draw a
+// trend line through months that actually have data, skipping any zero
+// months before the account existed so they don't drag the line down.
+function linearRegression(points) {
+  const n = points.length;
+  if (n < 2) return null;
+  const xMean = points.reduce((s, p) => s + p.x, 0) / n;
+  const yMean = points.reduce((s, p) => s + p.y, 0) / n;
+  let num = 0;
+  let den = 0;
+  for (const p of points) {
+    num += (p.x - xMean) * (p.y - yMean);
+    den += (p.x - xMean) ** 2;
+  }
+  if (den === 0) return null;
+  const slope = num / den;
+  return { slope, intercept: yMean - slope * xMean };
+}
+
+function renderHistoryChart(allMonths) {
+  const container = document.getElementById("history-chart");
+  container.innerHTML = "";
+
+  const months = allMonths.slice(-12);
+  if (months.length === 0) return;
+
+  const width = 640;
+  const height = 260;
+  const margin = { top: 12, right: 12, bottom: 28, left: 44 };
+  const plotWidth = width - margin.left - margin.right;
+  const plotHeight = height - margin.top - margin.bottom;
+
+  const values = months.map((m) => m.netCostGBP);
+  const dataMin = Math.min(0, ...values);
+  const dataMax = Math.max(0, ...values, 0.01);
+  const ticks = niceTicks(dataMin, dataMax, 4);
+  const yMin = ticks[0];
+  const yMax = ticks[ticks.length - 1];
+
+  const y = (v) => margin.top + plotHeight - ((v - yMin) / (yMax - yMin)) * plotHeight;
+  const zeroY = y(0);
+
+  const slotWidth = plotWidth / months.length;
+  const barWidth = Math.min(40, slotWidth * 0.55);
+  const xCenter = (i) => margin.left + slotWidth * i + slotWidth / 2;
+
+  const trendPoints = months
+    .map((m, i) => ({ x: i, y: m.netCostGBP, hasData: m.daysWithData > 0 }))
+    .filter((p) => p.hasData);
+  const trend = linearRegression(trendPoints);
+
+  let svg = `<svg viewBox="0 0 ${width} ${height}" xmlns="http://www.w3.org/2000/svg">`;
+
+  // Gridlines + y-axis labels.
+  for (const tick of ticks) {
+    const ty = y(tick);
+    svg += `<line class="hc-gridline" x1="${margin.left}" x2="${width - margin.right}" y1="${ty}" y2="${ty}"></line>`;
+    svg += `<text class="hc-tick-label" x="${margin.left - 6}" y="${ty + 3}" text-anchor="end">${gbp.format(tick)}</text>`;
+  }
+
+  // Zero baseline (x-axis), drawn distinctly from the lighter gridlines above.
+  svg += `<line class="hc-axis" x1="${margin.left}" x2="${width - margin.right}" y1="${zeroY}" y2="${zeroY}"></line>`;
+
+  // Bars.
+  months.forEach((month, i) => {
+    const cx = xCenter(i);
+    const v = month.netCostGBP;
+    const barY = Math.min(y(v), zeroY);
+    const barHeight = Math.max(Math.abs(y(v) - zeroY), 1);
+    const label = `${monthFormatter.format(new Date(month.month + "-01T00:00:00"))}: ${gbp.format(v)}`;
+    svg +=
+      `<rect class="hc-bar${month.daysWithData === 0 ? " is-estimated" : ""}" ` +
+      `x="${cx - barWidth / 2}" y="${barY}" width="${barWidth}" height="${barHeight}" rx="3">` +
+      `<title>${label}</title></rect>`;
+  });
+
+  // Trend line, drawn across the full width even where the fit skipped
+  // leading zero-months, so it reads as one continuous line.
+  if (trend) {
+    const x1 = 0;
+    const x2 = months.length - 1;
+    const trendY1 = y(trend.intercept + trend.slope * x1);
+    const trendY2 = y(trend.intercept + trend.slope * x2);
+    svg += `<line class="hc-trend" x1="${xCenter(x1)}" y1="${trendY1}" x2="${xCenter(x2)}" y2="${trendY2}"><title>Trend</title></line>`;
+  }
+
+  // X-axis month labels.
+  months.forEach((month, i) => {
+    const label = monthFormatter.format(new Date(month.month + "-01T00:00:00")).split(" ")[0];
+    svg += `<text class="hc-tick-label" x="${xCenter(i)}" y="${height - margin.bottom + 16}" text-anchor="middle">${label}</text>`;
+  });
+
+  // Legend.
+  const legendY = margin.top + 2;
+  svg += `<g class="hc-legend">`;
+  svg += `<rect class="hc-bar" x="${width - margin.right - 150}" y="${legendY - 8}" width="10" height="10" rx="2"></rect>`;
+  svg += `<text x="${width - margin.right - 136}" y="${legendY + 1}">Net cost</text>`;
+  if (trend) {
+    svg += `<line x1="${width - margin.right - 68}" x2="${width - margin.right - 52}" y1="${legendY - 3}" y2="${legendY - 3}" class="hc-trend"></line>`;
+    svg += `<text x="${width - margin.right - 46}" y="${legendY + 1}">Trend</text>`;
+  }
+  svg += `</g>`;
+
+  svg += `</svg>`;
+  container.innerHTML = svg;
 }
 
 function renderHistoryTable(months, hasSavings) {
