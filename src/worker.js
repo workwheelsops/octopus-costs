@@ -3,10 +3,16 @@ import { computeCosts, computeHistoricalMonths, computeCurrentMonthHistory } fro
 // Closed historical months never change once the month ends, so they're
 // cached for a long time - there's no reason to re-fetch ~34k consumption
 // records plus every historical tariff's rates just because the cache
-// expired. The current (still open) month is cheap to compute on its own
-// (one month, not up to 24) and changes throughout the day, so it's cached
-// for much less time. Append ?refresh=1 to force both to recompute (e.g.
-// right after adding a secret that changes how something is priced).
+// expired. The current (still open) month - both the /api/costs view and
+// history's current-month slice - only actually changes once a day, when
+// Octopus publishes the previous day's half-hourly consumption (typically
+// by evening), so there's no need to recompute it from scratch on every
+// page load either; it's cached for a shorter time than the historical
+// months, just long enough to make repeat loads fast without going stale
+// for long. Append ?refresh=1 to force all of it to recompute (e.g. right
+// after adding a secret that changes how something is priced, or to pick
+// up today's data as soon as it lands rather than waiting for the cache to
+// expire).
 const HISTORICAL_CACHE_SECONDS = 24 * 60 * 60;
 const CURRENT_MONTH_CACHE_SECONDS = 30 * 60;
 
@@ -14,7 +20,8 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     if (url.pathname === "/api/costs" && request.method === "GET") {
-      return computeCosts(env);
+      const forceRefresh = url.searchParams.has("refresh");
+      return withEdgeCache(request, env, forceRefresh, () => computeCosts(env), CURRENT_MONTH_CACHE_SECONDS, "costs");
     }
     if (url.pathname === "/api/history" && request.method === "GET") {
       const forceRefresh = url.searchParams.has("refresh");

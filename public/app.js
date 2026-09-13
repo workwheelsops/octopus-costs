@@ -476,7 +476,7 @@ function hideError() {
 async function loadDashboard(forceRefresh) {
   try {
     const [costsRes, historyRes] = await Promise.all([
-      fetch("/api/costs"),
+      fetch(forceRefresh ? "/api/costs?refresh=1" : "/api/costs"),
       fetch(forceRefresh ? "/api/history?refresh=1" : "/api/history"),
     ]);
     const costs = await costsRes.json();
