@@ -177,7 +177,7 @@ function renderSparkline(savingsByMonth) {
 
 function renderCaptions(data) {
   document.getElementById("forecast-caption").innerHTML =
-    `<strong>${gbp.format(data.spendToDate)}</strong> spent so far`;
+    `<strong>${gbp.format(data.spendToDate)}</strong> spent so far (incl. Axle)`;
 
   const lastMonthEl = document.getElementById("last-month-caption");
   if (data.lastMonthNetCostGBP != null) {
