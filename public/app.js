@@ -45,6 +45,31 @@ function dayLabel(y, m, day, withMonth) {
   return `${d.getUTCDate()} ${monthAbbrev}`;
 }
 
+const londonDateKeyFormatter = new Intl.DateTimeFormat("en-CA", {
+  timeZone: "Europe/London",
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+});
+
+// "YYYY-MM-DD" for the current London calendar date - same format the
+// backend's day keys already use (costs.days[].date).
+function londonTodayDateKey() {
+  return londonDateKeyFormatter.format(new Date());
+}
+
+// Shifts a "YYYY-MM-DD" date key by `delta` days, staying correct across
+// month/year boundaries and DST changes - starts from UTC noon on that date
+// (never within an hour of a London DST transition either side) so the
+// shifted instant still lands on the intended calendar date once formatted
+// back into Europe/London.
+function addDaysToDateKey(dateKey, delta) {
+  const [y, m, d] = dateKey.split("-").map(Number);
+  const noon = new Date(Date.UTC(y, m - 1, d, 12, 0, 0));
+  noon.setUTCDate(noon.getUTCDate() + delta);
+  return londonDateKeyFormatter.format(noon);
+}
+
 // "2026-05" -> "1 May 2026" - the first full calendar month the running
 // savings total counts from.
 function firstOfMonthLabel(monthKey) {
@@ -101,6 +126,24 @@ function deriveData(costs, history) {
   const lastMonthNetCostGBP =
     lastMonthEntry && lastMonthEntry.daysWithData > 0 ? lastMonthEntry.netCostGBP : null;
 
+  // The most recent complete day (net of export, matching the daily chart's
+  // bars) - null for the first day or two of a new month, since day-level
+  // data is only available for the current month, not carried over from the
+  // API's monthly-only view of prior months.
+  let yesterdayCostGBP = null;
+  let yesterdayLabel = null;
+  if (costs.days.length > 0) {
+    const lastDay = costs.days[costs.days.length - 1];
+    yesterdayCostGBP = round2(lastDay.costGBP - lastDay.exportProfitGBP);
+    const expectedYesterdayKey = addDaysToDateKey(londonTodayDateKey(), -1);
+    if (lastDay.date === expectedYesterdayKey) {
+      yesterdayLabel = "Yesterday";
+    } else {
+      const [ly, lm, ld] = lastDay.date.split("-").map(Number);
+      yesterdayLabel = dayLabel(ly, lm, ld, true);
+    }
+  }
+
   const dailyCosts = [];
   for (let i = 0; i < daysInMonth; i++) {
     if (i < daysElapsed) {
@@ -121,6 +164,8 @@ function deriveData(costs, history) {
     dailyCosts,
     averageDailyCostGBP: costs.averageDailyCostGBP,
     lastMonthNetCostGBP,
+    yesterdayCostGBP,
+    yesterdayLabel,
     daysElapsed,
     daysInMonth,
     monthStart: costs.monthStart,
@@ -470,6 +515,14 @@ function renderContext(data) {
     year: "numeric",
   }).format(new Date(data.monthStart));
   document.getElementById("context-month").textContent = month;
+
+  const yesterdayEl = document.getElementById("context-yesterday");
+  if (data.yesterdayCostGBP != null) {
+    yesterdayEl.textContent = `${data.yesterdayLabel} ${gbp.format(data.yesterdayCostGBP)}`;
+    yesterdayEl.hidden = false;
+  } else {
+    yesterdayEl.hidden = true;
+  }
 
   const time = new Intl.DateTimeFormat("en-GB", {
     timeZone: "Europe/London",

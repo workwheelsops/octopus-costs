@@ -118,12 +118,32 @@ a:hover {
   align-items: center;
   justify-content: space-between;
   gap: 20px;
+  flex-wrap: wrap;
+  row-gap: 6px;
+}
+
+.context-strip__left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  row-gap: 6px;
 }
 
 .context-strip__month {
   font-size: 15px;
   font-weight: 600;
   color: var(--ink);
+}
+
+.context-strip__yesterday {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink);
+  background: var(--purple-100);
+  padding: 3px 8px;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
 }
 
 .context-strip__meta {
@@ -564,6 +584,11 @@ a:hover {
 
   .context-strip__month {
     font-size: 14px;
+  }
+
+  .context-strip__yesterday {
+    font-size: 12px;
+    padding: 2px 7px;
   }
 
   .context-strip__meta {
