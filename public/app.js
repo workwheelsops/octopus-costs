@@ -613,8 +613,16 @@ function hideError() {
 async function loadDashboard(forceRefresh) {
   try {
     const [costsRes, historyRes] = await Promise.all([
-      fetch(forceRefresh ? "/api/costs?refresh=1" : "/api/costs"),
-      fetch(forceRefresh ? "/api/history?refresh=1" : "/api/history"),
+      // The responses carry a long Cache-Control (meant for Cloudflare's edge
+      // cache), which the browser's own HTTP cache would otherwise also
+      // honour - so a second tap on Refresh could silently be served the
+      // first tap's cached response, never reaching the network at all.
+      // no-store forces every refresh to be a genuine round trip.
+      fetch(forceRefresh ? "/api/costs?refresh=1" : "/api/costs", forceRefresh ? { cache: "no-store" } : undefined),
+      fetch(
+        forceRefresh ? "/api/history?refresh=1" : "/api/history",
+        forceRefresh ? { cache: "no-store" } : undefined
+      ),
     ]);
     const costs = await costsRes.json();
     const history = await historyRes.json();
