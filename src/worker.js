@@ -28,7 +28,17 @@ export default {
       const forceRefresh = url.searchParams.has("refresh");
       return handleHistory(request, env, forceRefresh);
     }
-    return env.ASSETS.fetch(request);
+
+    // The static files (index.html/app.js/style.css) aren't fingerprinted,
+    // so nothing in their URL changes when a deploy updates them - whatever
+    // caching header Cloudflare's asset serving defaults to is what decides
+    // whether a browser notices a new deploy at all. Force revalidation
+    // instead of trusting that default, so a fix shipped here is never
+    // masked by a browser quietly running yesterday's app.js.
+    const assetResponse = await env.ASSETS.fetch(request);
+    const headers = new Headers(assetResponse.headers);
+    headers.set("Cache-Control", "no-cache");
+    return new Response(assetResponse.body, { status: assetResponse.status, headers });
   },
 };
 
