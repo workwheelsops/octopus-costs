@@ -583,14 +583,19 @@ async function loadDashboard(forceRefresh) {
 
 async function main() {
   renderSkeleton();
-  await loadDashboard(false);
 
+  // Wire up Refresh before the initial load, not after - otherwise a tap
+  // during that first fetch (more likely on a slow connection, and mobile
+  // users are exactly the ones who'd get impatient and tap) is silently
+  // swallowed, since the listener isn't attached yet to catch it.
   document.getElementById("refresh-btn").addEventListener("click", async () => {
     const btn = document.getElementById("refresh-btn");
     btn.classList.add("is-busy");
     await loadDashboard(true);
     btn.classList.remove("is-busy");
   });
+
+  await loadDashboard(false);
 }
 
 main();
