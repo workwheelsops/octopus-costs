@@ -89,11 +89,15 @@ function firstOfMonthLabel(monthKey) {
 function deriveData(costs, history) {
   const daysElapsed = costs.days.length;
   const daysInMonth = costs.daysInMonth;
+  // "Electricity cost" here already nets off solar export - it's the same
+  // net-of-export figure the daily chart's bars use - leaving Axle profit as
+  // the one deduction the caption's formula needs to show separately.
+  const electricityCostGBP = round2(costs.totalCostGBP - costs.totalExportProfitGBP);
   // Nets off both export and Axle profit, same as the forecast and last
   // month's net cost - so the progress bar (spendToDate / forecast) compares
   // like with like, and the two stacked captions in this cell aren't netted
   // differently from each other.
-  const spendToDate = round2(costs.totalCostGBP - costs.totalExportProfitGBP - costs.axleVppProfitGBP);
+  const spendToDate = round2(electricityCostGBP - costs.axleVppProfitGBP);
   const forecast = costs.forecastCostGBP;
 
   const months = history.months || [];
@@ -156,6 +160,8 @@ function deriveData(costs, history) {
 
   return {
     spendToDate,
+    electricityCostGBP,
+    axleVppProfitGBP: costs.axleVppProfitGBP,
     forecast,
     savingsTotal,
     savingsThisMonth,
@@ -222,7 +228,8 @@ function renderSparkline(savingsByMonth) {
 
 function renderCaptions(data) {
   document.getElementById("forecast-caption").innerHTML =
-    `<strong>${gbp.format(data.spendToDate)}</strong> spent so far (incl. Axle)`;
+    `Electricity cost ${gbp.format(data.electricityCostGBP)} − Axle profit ${gbp.format(data.axleVppProfitGBP)} ` +
+    `= <strong>${gbp.format(data.spendToDate)}</strong> spent so far`;
 
   const lastMonthEl = document.getElementById("last-month-caption");
   if (data.lastMonthNetCostGBP != null) {
