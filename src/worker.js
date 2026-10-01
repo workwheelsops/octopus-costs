@@ -5,24 +5,39 @@ import {
   londonWallTimeToUTC,
 } from "./costs.js";
 
-// Everything cached here only actually changes once a day, when Octopus
-// publishes the previous day's half-hourly consumption - typically by
-// evening. Rather than a fixed TTL (which just counts down from whenever a
-// cache entry happened to be written, drifting out of sync with that daily
-// update), every cache entry's max-age is set to "seconds until the next
-// occurrence of this cutoff" - so a cache entry never lives longer than a
-// day, and a page load shortly after the cutoff always sees fresh figures
-// rather than waiting out a fixed window. Append ?refresh=1 to force an
-// immediate recompute regardless (e.g. right after adding a secret that
-// changes how something is priced).
+// The current (still open) month changes once a day, when Octopus publishes
+// the previous day's half-hourly consumption - typically by evening. Rather
+// than a fixed TTL (which just counts down from whenever a cache entry
+// happened to be written, drifting out of sync with that daily update),
+// its cache entries expire at "seconds until the next occurrence of this
+// cutoff" - never cached longer than a day, and a page load shortly after
+// the cutoff always sees fresh figures rather than waiting out a fixed
+// window. Append ?refresh=1 to force an immediate recompute regardless
+// (e.g. right after adding a secret that changes how something is priced).
 const REFRESH_CUTOFF_HOUR_LONDON = 19;
+
+// Closed historical months never change once the month ends - nothing about
+// a past month's price is still moving the way the current month's is - so
+// there's no reason to tie their cache to a daily cutoff at all. Cached for
+// a month at a time instead; ?refresh=1 still bypasses this immediately
+// (e.g. right after adding a past month's Axle figure), and a deploy busts
+// it automatically via the version-tied cache key below regardless of how
+// long is left on this TTL.
+const HISTORICAL_CACHE_SECONDS = 30 * 24 * 60 * 60;
 
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     if (url.pathname === "/api/costs" && request.method === "GET") {
       const forceRefresh = url.searchParams.has("refresh");
-      return withEdgeCache(request, env, forceRefresh, () => computeCosts(env), "costs");
+      return withEdgeCache(
+        request,
+        env,
+        forceRefresh,
+        () => computeCosts(env),
+        "costs",
+        secondsUntilNextLondonCutoff(REFRESH_CUTOFF_HOUR_LONDON)
+      );
     }
     if (url.pathname === "/api/history" && request.method === "GET") {
       const forceRefresh = url.searchParams.has("refresh");
@@ -48,7 +63,8 @@ async function handleHistory(request, env, forceRefresh) {
     env,
     forceRefresh,
     () => computeHistoricalMonths(env),
-    "historical"
+    "historical",
+    HISTORICAL_CACHE_SECONDS
   );
   if (historicalRes.status !== 200) return historicalRes;
   const historical = await historicalRes.clone().json();
@@ -58,7 +74,8 @@ async function handleHistory(request, env, forceRefresh) {
     env,
     forceRefresh,
     () => computeCurrentMonthHistory(env, historical.finalRunningSavingGBP ?? 0),
-    "current"
+    "current",
+    secondsUntilNextLondonCutoff(REFRESH_CUTOFF_HOUR_LONDON)
   );
   if (currentRes.status !== 200) return currentRes;
   const current = await currentRes.clone().json();
@@ -82,7 +99,7 @@ async function handleHistory(request, env, forceRefresh) {
   return new Response(JSON.stringify(merged), { status: 200, headers });
 }
 
-async function withEdgeCache(request, env, forceRefresh, computeFn, keySuffix) {
+async function withEdgeCache(request, env, forceRefresh, computeFn, keySuffix, ttlSeconds) {
   const cache = caches.default;
   // caches.default is per-datacenter and has no idea the Worker's code
   // changed between deploys, so a stale response from the previous version
@@ -106,7 +123,6 @@ async function withEdgeCache(request, env, forceRefresh, computeFn, keySuffix) {
 
   const bodyText = await response.text();
   const headers = new Headers(response.headers);
-  const ttlSeconds = secondsUntilNextLondonCutoff(REFRESH_CUTOFF_HOUR_LONDON);
   headers.set("Cache-Control", `public, max-age=${ttlSeconds}`);
   headers.set("X-Cache-Generated-At", new Date().toISOString());
 
