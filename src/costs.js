@@ -529,7 +529,7 @@ async function computeDailyBreakdown(env, rangeStart, rangeEnd, { includeProduct
   // dispatch windows on top of it, which vary night to night. Fetch the
   // account's actual completed dispatches via the (separate) GraphQL API
   // so those bonus windows count as off-peak too.
-  const { dispatchWindows, dispatchDebug } = await fetchDispatchWindows(
+  const { dispatchWindows, dispatchDebug, devicesDebug } = await fetchDispatchWindows(
     apiKey,
     accountNumber,
     rangeStart,
@@ -718,6 +718,7 @@ async function computeDailyBreakdown(env, rangeStart, rangeEnd, { includeProduct
       sampleRateKeys,
       export: exportDebug,
       dispatches: dispatchDebug,
+      devices: devicesDebug,
       evThresholdKwh,
       evThresholdReclassifiedKwh: round(evThresholdReclassifiedKwh, 3),
       evThresholdReclassifiedSlots,
@@ -1010,6 +1011,14 @@ async function fetchDispatchWindows(apiKey, accountNumber, rangeStart, rangeEnd)
       .map((d) => ({ start: new Date(d.start), end: new Date(d.end) }))
       .filter((w) => w.end > rangeStart && w.start < rangeEnd);
 
+    // completedDispatches only covers Octopus's own smart-charge scheduling.
+    // A registered battery/EV device (e.g. a home battery on Intelligent
+    // Octopus Flex) can have its own smart-charge data tracked elsewhere, so
+    // list whatever devices this account has registered purely for
+    // diagnostics - this doesn't feed pricing yet, since the exact field
+    // that would expose a device's own off-peak-eligible energy isn't known.
+    const devicesDebug = await fetchRegisteredDevices(token, accountNumber);
+
     return {
       dispatchWindows: windows,
       dispatchDebug: {
@@ -1017,9 +1026,38 @@ async function fetchDispatchWindows(apiKey, accountNumber, rangeStart, rangeEnd)
         dispatchesInRange: windows.length,
         sample: raw.slice(0, 3),
       },
+      devicesDebug,
     };
   } catch (err) {
     return { dispatchWindows: [], dispatchDebug: { step: "exception", error: err.message } };
+  }
+}
+
+// Diagnostics only: lists devices (EV chargers, batteries) registered to
+// this account via Kraken's `devices` query, so a registered battery/EV
+// charger can be confirmed to exist (and its provider/type seen) ahead of
+// building real pricing logic against whatever API actually exposes its
+// per-slot smart-charge energy. Never throws - a failure here must not
+// affect pricing, which doesn't depend on this at all.
+async function fetchRegisteredDevices(token, accountNumber) {
+  try {
+    const res = await fetch(KRAKEN_GRAPHQL_URL, {
+      method: "POST",
+      headers: { "content-type": "application/json", Authorization: token },
+      body: JSON.stringify({
+        query:
+          "query getDevices($accountNumber: String!) { " +
+          "devices(accountNumber: $accountNumber) { id deviceType name provider } }",
+        variables: { accountNumber },
+      }),
+    });
+    const data = await res.json();
+    if (data.errors?.length) {
+      return { step: "devices", errors: data.errors.map((e) => e.message) };
+    }
+    return { devices: data.data?.devices ?? [] };
+  } catch (err) {
+    return { step: "devices", error: err.message };
   }
 }
 
