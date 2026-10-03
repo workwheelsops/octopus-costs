@@ -529,7 +529,7 @@ async function computeDailyBreakdown(env, rangeStart, rangeEnd, { includeProduct
   // dispatch windows on top of it, which vary night to night. Fetch the
   // account's actual completed dispatches via the (separate) GraphQL API
   // so those bonus windows count as off-peak too.
-  const { dispatchWindows, dispatchDebug, devicesDebug, schemaHintsDebug } = await fetchDispatchWindows(
+  const { dispatchWindows, dispatchDebug, vehicleSessionsDebug, useEvThreshold } = await fetchDispatchWindows(
     apiKey,
     accountNumber,
     rangeStart,
@@ -587,7 +587,7 @@ async function computeDailyBreakdown(env, rangeStart, rangeEnd, { includeProduct
         const kwh = slot.consumption;
         totalExportKwh += kwh;
         const slotInstant = new Date(slot.interval_start);
-        const rate = lookupRate(slotInstant, kwh, exportRateContext, dispatchWindows, evThresholdKwh);
+        const rate = lookupRate(slotInstant, kwh, exportRateContext, dispatchWindows, evThresholdKwh, useEvThreshold);
         if (rate == null) {
           slotsWithNoRate++;
           continue;
@@ -624,12 +624,12 @@ async function computeDailyBreakdown(env, rangeStart, rangeEnd, { includeProduct
     const kwh = slot.consumption;
     const slotInstant = new Date(slot.interval_start);
     const standardOffPeak = isStandardOffPeakWindow(slotInstant);
-    const offPeak = isOffPeak(slotInstant, kwh, dispatchWindows, evThresholdKwh);
-    if (offPeak && !standardOffPeak && kwh >= evThresholdKwh) {
+    const offPeak = isOffPeak(slotInstant, kwh, dispatchWindows, evThresholdKwh, useEvThreshold);
+    if (offPeak && !standardOffPeak && useEvThreshold && kwh >= evThresholdKwh) {
       evThresholdReclassifiedKwh += kwh;
       evThresholdReclassifiedSlots++;
     }
-    const rate = lookupRate(slotInstant, kwh, rateContext, dispatchWindows, evThresholdKwh);
+    const rate = lookupRate(slotInstant, kwh, rateContext, dispatchWindows, evThresholdKwh, useEvThreshold);
     const dateKey = londonDateKey(slotInstant);
 
     const londonMinutes = getLondonMinutesOfDay(slotInstant);
@@ -718,8 +718,8 @@ async function computeDailyBreakdown(env, rangeStart, rangeEnd, { includeProduct
       sampleRateKeys,
       export: exportDebug,
       dispatches: dispatchDebug,
-      devices: devicesDebug,
-      schemaHints: schemaHintsDebug,
+      vehicleSessions: vehicleSessionsDebug,
+      useEvThreshold,
       evThresholdKwh,
       evThresholdReclassifiedKwh: round(evThresholdReclassifiedKwh, 3),
       evThresholdReclassifiedSlots,
@@ -903,7 +903,7 @@ async function buildRateContext(
 // Looks up the rate (pence/kWh inc VAT) for one consumption slot: the
 // half-hourly rateMap (exact instant match) or interval-containment fallback
 // for the same segment, then the day/night fallback if neither has anything.
-function lookupRate(slotInstant, kwh, rateContext, dispatchWindows, evThresholdKwh) {
+function lookupRate(slotInstant, kwh, rateContext, dispatchWindows, evThresholdKwh, useEvThreshold = true) {
   const rateSeg = rateContext.rateSegments.find(
     (s) => slotInstant >= s.segStart && slotInstant < s.segEnd
   );
@@ -924,6 +924,7 @@ function lookupRate(slotInstant, kwh, rateContext, dispatchWindows, evThresholdK
     // should apply there too - whichever path supplied the exact rate.
     if (
       rateSeg?.isLikelyFixedDualRate &&
+      useEvThreshold &&
       kwh >= evThresholdKwh &&
       !isStandardOffPeakWindow(slotInstant) &&
       rateSeg.minRate < rate
@@ -937,7 +938,7 @@ function lookupRate(slotInstant, kwh, rateContext, dispatchWindows, evThresholdK
     (s) => slotInstant >= s.segStart && slotInstant < s.segEnd
   );
   if (!dayNightSeg) return null;
-  const rates = isOffPeak(slotInstant, kwh, dispatchWindows, evThresholdKwh)
+  const rates = isOffPeak(slotInstant, kwh, dispatchWindows, evThresholdKwh, useEvThreshold)
     ? dayNightSeg.nightRates
     : dayNightSeg.dayRates;
   return findActiveRate(rates, slotInstant);
@@ -1007,100 +1008,113 @@ async function fetchDispatchWindows(apiKey, accountNumber, rangeStart, rangeEnd)
     }
 
     const raw = dispatchData.data?.completedDispatches ?? [];
-    const windows = raw
+    const dispatchWindowsOnly = raw
       .filter((d) => d.start && d.end)
       .map((d) => ({ start: new Date(d.start), end: new Date(d.end) }))
       .filter((w) => w.end > rangeStart && w.start < rangeEnd);
 
-    // completedDispatches only covers Octopus's own smart-charge scheduling.
-    // A registered battery/EV device (e.g. a home battery on Intelligent
-    // Octopus Flex) can have its own smart-charge data tracked elsewhere, so
-    // list whatever devices this account has registered purely for
-    // diagnostics - this doesn't feed pricing yet, since the exact field
-    // that would expose a device's own off-peak-eligible energy isn't known.
-    const devicesDebug = await fetchRegisteredDevices(token, accountNumber);
-    const schemaHintsDebug = await fetchSchemaHints(token);
+    // completedDispatches only covers Octopus's own smart-charge scheduling,
+    // not a registered EV's own reported charging (e.g. a Tesla that Octopus
+    // bills at the off-peak rate unconditionally whenever it's plugged in,
+    // via its native vehicle integration rather than a dispatch it issued).
+    // Fetch those sessions too and fold their windows in alongside the
+    // dispatch windows below, so a slot is correctly off-peak whichever of
+    // the two actually explains it.
+    const vehicleSessions = await fetchVehicleChargingSessions(token, accountNumber, rangeStart, rangeEnd);
+    const windows = dispatchWindowsOnly.concat(
+      vehicleSessions.windows.filter((w) => w.end > rangeStart && w.start < rangeEnd)
+    );
 
     return {
       dispatchWindows: windows,
       dispatchDebug: {
         totalDispatchesEver: raw.length,
-        dispatchesInRange: windows.length,
+        dispatchesInRange: dispatchWindowsOnly.length,
         sample: raw.slice(0, 3),
       },
-      devicesDebug,
-      schemaHintsDebug,
+      vehicleSessionsDebug: vehicleSessions.debug,
+      // Real session data (even zero sessions in range) is strictly better
+      // ground truth than the magnitude guess, since it also avoids that
+      // guess's false positive on a large non-EV appliance draw. Only fall
+      // back to the heuristic when the account has no such data at all.
+      useEvThreshold: !vehicleSessions.succeeded,
     };
   } catch (err) {
-    return { dispatchWindows: [], dispatchDebug: { step: "exception", error: err.message } };
+    return {
+      dispatchWindows: [],
+      dispatchDebug: { step: "exception", error: err.message },
+      useEvThreshold: true,
+    };
   }
 }
 
-// Diagnostics only: lists devices (EV chargers, batteries) registered to
-// this account via Kraken's `devices` query, so a registered battery/EV
-// charger can be confirmed to exist (and its provider/type seen) ahead of
-// building real pricing logic against whatever API actually exposes its
-// per-slot smart-charge energy. Never throws - a failure here must not
-// affect pricing, which doesn't depend on this at all.
-async function fetchRegisteredDevices(token, accountNumber) {
+// Fetches each registered EV's own reported charging sessions (e.g. via
+// Octopus's native Tesla integration) for the given range. This is ground
+// truth for "this energy was EV-routed and bills at the off-peak rate",
+// confirmed against the live Kraken schema: `devices` can return a
+// SmartFlexVehicle, whose `chargingSessions` connection holds
+// DeviceChargingSession nodes with start/end times. Degrades gracefully
+// (empty windows, succeeded: false) if this account has no such device or
+// the call fails - the standard off-peak window and dispatch windows still
+// apply either way, and the caller falls back to the magnitude heuristic.
+async function fetchVehicleChargingSessions(token, accountNumber, rangeStart, rangeEnd) {
   try {
     const res = await fetch(KRAKEN_GRAPHQL_URL, {
       method: "POST",
       headers: { "content-type": "application/json", Authorization: token },
       body: JSON.stringify({
         query:
-          "query getDevices($accountNumber: String!) { " +
-          "devices(accountNumber: $accountNumber) { id deviceType name provider } }",
-        variables: { accountNumber },
+          "query getChargingSessions($accountNumber: String!, $after: DateTime, $before: DateTime) { " +
+          "devices(accountNumber: $accountNumber) { id deviceType name " +
+          "... on SmartFlexVehicle { chargingSessions(after: $after, before: $before, first: 200) { " +
+          "edges { node { start end energyAdded { value unit } cost { amount currency } } } } } } }",
+        variables: {
+          accountNumber,
+          after: rangeStart.toISOString(),
+          before: rangeEnd.toISOString(),
+        },
       }),
     });
     const data = await res.json();
     if (data.errors?.length) {
-      return { step: "devices", errors: data.errors.map((e) => e.message) };
+      return {
+        windows: [],
+        succeeded: false,
+        debug: { step: "chargingSessions", errors: data.errors.map((e) => e.message) },
+      };
     }
-    return { devices: data.data?.devices ?? [] };
-  } catch (err) {
-    return { step: "devices", error: err.message };
-  }
-}
 
-// Diagnostics only: confirmed SmartFlexVehicle.chargingSessions returns
-// DeviceChargingSession { start end stateOfChargeChange stateOfChargeFinal
-// energyAdded cost } - a registered EV's own reported charging sessions,
-// which is what actually explains an account's "EV-routed energy always
-// bills off-peak" behaviour, unlike the magnitude heuristic this app
-// currently guesses with. Still missing: what fields Energy/Money expose
-// (value+unit? amount+currency?) and whether chargingSessions takes a date
-// range. This introspects exactly those, to write the real query without
-// guessing. Never throws and never affects pricing.
-async function fetchSchemaHints(token) {
-  const typeRefFragment =
-    "fragment TypeRef on __Type { name kind ofType { name kind ofType { name kind ofType { name } } } }";
-  try {
-    const query =
-      "query { " +
-      'energy: __type(name: "Energy") { name fields { name type { ...TypeRef } } } ' +
-      'money: __type(name: "Money") { name fields { name type { ...TypeRef } } } ' +
-      'vehicle: __type(name: "SmartFlexVehicle") { fields { name args { name type { ...TypeRef } } } } ' +
-      "} " +
-      typeRefFragment;
-    const res = await fetch(KRAKEN_GRAPHQL_URL, {
-      method: "POST",
-      headers: { "content-type": "application/json", Authorization: token },
-      body: JSON.stringify({ query }),
-    });
-    const data = await res.json();
-    if (data.errors?.length) {
-      return { step: "schema", errors: data.errors.map((e) => e.message) };
+    const devices = data.data?.devices ?? [];
+    const windows = [];
+    const sample = [];
+    for (const device of devices) {
+      for (const edge of device.chargingSessions?.edges ?? []) {
+        const node = edge.node;
+        if (!node?.start || !node?.end) continue;
+        windows.push({ start: new Date(node.start), end: new Date(node.end) });
+        if (sample.length < 5) {
+          sample.push({
+            deviceName: device.name,
+            start: node.start,
+            end: node.end,
+            energyAdded: node.energyAdded,
+            cost: node.cost,
+          });
+        }
+      }
     }
-    const chargingSessionsField = data.data?.vehicle?.fields?.find((f) => f.name === "chargingSessions");
+
     return {
-      Energy: data.data?.energy ?? null,
-      Money: data.data?.money ?? null,
-      chargingSessionsArgs: chargingSessionsField?.args ?? null,
+      windows,
+      succeeded: true,
+      debug: {
+        vehicleDeviceCount: devices.filter((d) => d.chargingSessions != null).length,
+        sessionCount: windows.length,
+        sample,
+      },
     };
   } catch (err) {
-    return { step: "schema", error: err.message };
+    return { windows: [], succeeded: false, debug: { step: "exception", error: err.message } };
   }
 }
 
@@ -1183,14 +1197,18 @@ function getLondonMinutesOfDay(date) {
   return (+parts.hour % 24) * 60 + +parts.minute;
 }
 
-// A slot is off-peak if it's within the standard baseline window, within one
-// of the account's actual smart-charge dispatch windows for that night, or
-// (heuristically) drawing enough power that it's almost certainly an EV
-// charging session rather than ordinary appliance use - Intelligent Octopus
-// Go bills those at the off-peak rate wherever they fall in the day.
-function isOffPeak(date, kwh, dispatchWindows, evThresholdKwh) {
+// A slot is off-peak if it's within the standard baseline window, or within
+// one of the account's actual off-peak windows for that night - completed
+// dispatches Octopus itself scheduled, or a registered EV's own reported
+// charging sessions (see fetchVehicleChargingSessions), both already folded
+// into dispatchWindows by the caller. useEvThreshold gates the magnitude
+// guess (treating any unusually large slot as EV charging) - it's only
+// meant as a fallback for accounts fetchVehicleChargingSessions couldn't
+// get real session data for, since otherwise it would misclassify a
+// genuine large non-EV appliance draw as off-peak.
+function isOffPeak(date, kwh, dispatchWindows, evThresholdKwh, useEvThreshold = true) {
   if (isStandardOffPeakWindow(date)) return true;
-  if (kwh >= evThresholdKwh) return true;
+  if (useEvThreshold && kwh >= evThresholdKwh) return true;
   return dispatchWindows.some((w) => date >= w.start && date < w.end);
 }
 
