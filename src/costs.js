@@ -1059,61 +1059,59 @@ async function fetchDispatchWindows(apiKey, accountNumber, rangeStart, rangeEnd)
 // apply either way, and the caller falls back to the magnitude heuristic.
 async function fetchVehicleChargingSessions(token, accountNumber, rangeStart, rangeEnd) {
   try {
+    // Dropping `before` alongside first+after didn't clear "Invalid
+    // pagination parameters" (confirmed live), so the actual invalid
+    // combination is still unknown. Rather than guess again, try several
+    // plausible argument shapes against the real API in one round trip -
+    // aliased so each combo's own errors are distinguishable by path - and
+    // report which one(s) actually work. Diagnostics only until one does;
+    // falls back to the magnitude heuristic exactly as a total failure would.
     const res = await fetch(KRAKEN_GRAPHQL_URL, {
       method: "POST",
       headers: { "content-type": "application/json", Authorization: token },
       body: JSON.stringify({
         query:
           "query getChargingSessions($accountNumber: String!, $after: DateTime) { " +
-          "devices(accountNumber: $accountNumber) { id deviceType name " +
-          "... on SmartFlexVehicle { chargingSessions(after: $after, first: 200) { " +
-          "edges { node { start end energyAdded { value unit } cost { amount currency } } } } } } }",
-        // Relay-style pagination rejects first+after+before together ("Invalid
-        // pagination parameters") - pair first with after only, and rely on
-        // the caller's own range filter (below, and again at the merge site)
-        // to drop anything past rangeEnd.
-        variables: {
-          accountNumber,
-          after: rangeStart.toISOString(),
-        },
+          "firstOnly: devices(accountNumber: $accountNumber) { id " +
+          "... on SmartFlexVehicle { chargingSessions(first: 10) { edges { node { start end } } } } } " +
+          "afterOnly: devices(accountNumber: $accountNumber) { id " +
+          "... on SmartFlexVehicle { chargingSessions(after: $after) { edges { node { start end } } } } } " +
+          "lastOnly: devices(accountNumber: $accountNumber) { id " +
+          "... on SmartFlexVehicle { chargingSessions(last: 10) { edges { node { start end } } } } } " +
+          "noArgs: devices(accountNumber: $accountNumber) { id " +
+          "... on SmartFlexVehicle { chargingSessions { edges { node { start end } } } } } }",
+        variables: { accountNumber, after: rangeStart.toISOString() },
       }),
     });
     const data = await res.json();
-    if (data.errors?.length) {
-      return {
-        windows: [],
-        succeeded: false,
-        debug: { step: "chargingSessions", errors: data.errors.map((e) => e.message) },
-      };
+
+    const errorsByPath = (data.errors ?? []).map((e) => ({ path: e.path, message: e.message }));
+    const combos = ["firstOnly", "afterOnly", "lastOnly", "noArgs"];
+    const windowsByCombo = {};
+    for (const combo of combos) {
+      const devices = data.data?.[combo] ?? [];
+      windowsByCombo[combo] = devices.flatMap((d) =>
+        (d.chargingSessions?.edges ?? [])
+          .map((e) => e.node)
+          .filter((n) => n?.start && n?.end)
+          .map((n) => ({ start: new Date(n.start), end: new Date(n.end) }))
+      );
     }
 
-    const devices = data.data?.devices ?? [];
-    const windows = [];
-    const sample = [];
-    for (const device of devices) {
-      for (const edge of device.chargingSessions?.edges ?? []) {
-        const node = edge.node;
-        if (!node?.start || !node?.end) continue;
-        windows.push({ start: new Date(node.start), end: new Date(node.end) });
-        if (sample.length < 5) {
-          sample.push({
-            deviceName: device.name,
-            start: node.start,
-            end: node.end,
-            energyAdded: node.energyAdded,
-            cost: node.cost,
-          });
-        }
-      }
-    }
+    // A combo "worked" if its own aliased field raised no error - zero
+    // sessions in range is a legitimate success, not a failure, so this
+    // can't be judged by whether it returned any windows.
+    const hasError = (combo) => errorsByPath.some((e) => e.path?.[0] === combo);
+    const workingCombo = combos.find((c) => !hasError(c));
 
     return {
-      windows,
-      succeeded: true,
+      windows: workingCombo ? windowsByCombo[workingCombo] : [],
+      succeeded: !!workingCombo,
       debug: {
-        vehicleDeviceCount: devices.filter((d) => d.chargingSessions != null).length,
-        sessionCount: windows.length,
-        sample,
+        step: workingCombo ? undefined : "chargingSessions",
+        workingCombo,
+        errorsByPath,
+        sessionCountByCombo: Object.fromEntries(combos.map((c) => [c, windowsByCombo[c].length])),
       },
     };
   } catch (err) {
