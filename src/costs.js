@@ -536,9 +536,14 @@ async function computeDailyBreakdown(env, rangeStart, rangeEnd, { includeProduct
   // dispatch windows on top of it, which vary night to night. Fetch the
   // account's actual completed dispatches via the (separate) GraphQL API
   // so those bonus windows count as off-peak too.
-  const { dispatchWindows, vehicleSessions, dispatchDebug, vehicleSessionsDebug, useEvThreshold } =
+  const { dispatchWindows, vehicleSessions, dispatchDebug, vehicleSessionsDebug, evDataStartsAt } =
     await fetchDispatchWindows(apiKey, accountNumber, rangeStart, rangeEnd);
   const evSessionSlotTimes = attributeVehicleSessionSlots(consumption, vehicleSessions, evThresholdKwh);
+  // Per-slot, not a single flag for the whole request: a multi-month
+  // history can straddle the point real session data actually starts
+  // (see fetchDispatchWindows), so a slot before that point still needs
+  // the heuristic even though later slots in the same request shouldn't.
+  const useEvThresholdFor = (slotInstant) => !evDataStartsAt || slotInstant < evDataStartsAt;
 
   // Export: many solar accounts have a second, export-only meter point.
   // Auto-detect it and price its consumption (= energy sent to the grid)
@@ -581,7 +586,14 @@ async function computeDailyBreakdown(env, rangeStart, rangeEnd, { includeProduct
         const kwh = slot.consumption;
         totalExportKwh += kwh;
         const slotInstant = new Date(slot.interval_start);
-        const rate = lookupRate(slotInstant, kwh, exportRateContext, dispatchWindows, evThresholdKwh, useEvThreshold);
+        const rate = lookupRate(
+          slotInstant,
+          kwh,
+          exportRateContext,
+          dispatchWindows,
+          evThresholdKwh,
+          useEvThresholdFor(slotInstant)
+        );
         if (rate == null) {
           slotsWithNoRate++;
           continue;
@@ -618,6 +630,7 @@ async function computeDailyBreakdown(env, rangeStart, rangeEnd, { includeProduct
     const kwh = slot.consumption;
     const slotInstant = new Date(slot.interval_start);
     const standardOffPeak = isStandardOffPeakWindow(slotInstant);
+    const useEvThreshold = useEvThresholdFor(slotInstant);
     const offPeak = isOffPeak(slotInstant, kwh, dispatchWindows, evThresholdKwh, useEvThreshold, evSessionSlotTimes);
     if (offPeak && !standardOffPeak && useEvThreshold && kwh >= evThresholdKwh) {
       evThresholdReclassifiedKwh += kwh;
@@ -722,7 +735,7 @@ async function computeDailyBreakdown(env, rangeStart, rangeEnd, { includeProduct
       dispatches: dispatchDebug,
       vehicleSessions: vehicleSessionsDebug,
       evSessionAttributedSlots: evSessionSlotTimes.size,
-      useEvThreshold,
+      evDataStartsAt: evDataStartsAt?.toISOString() ?? null,
       evThresholdKwh,
       evThresholdReclassifiedKwh: round(evThresholdReclassifiedKwh, 3),
       evThresholdReclassifiedSlots,
@@ -1042,18 +1055,24 @@ async function fetchDispatchWindows(apiKey, accountNumber, rangeStart, rangeEnd)
       },
       vehicleSessions: vehicleSessionsResult.sessions,
       vehicleSessionsDebug: vehicleSessionsResult.debug,
-      // Real session data (even zero sessions in range) is strictly better
-      // ground truth than the magnitude guess, since it also avoids that
-      // guess's false positive on a large non-EV appliance draw. Only fall
-      // back to the heuristic when the account has no such data at all.
-      useEvThreshold: !vehicleSessionsResult.succeeded,
+      // Real session data is strictly better ground truth than the
+      // magnitude guess for any slot it actually covers - but "the API
+      // call worked" doesn't mean every period in a multi-year history has
+      // real coverage: this account's Tesla integration evidently only
+      // started partway through (July 2026's off-peak share came out far
+      // lower than every surrounding month, right around when the tariff
+      // switched product codes). A slot before the earliest session ever
+      // seen has no real data to trust either way, so it still needs the
+      // heuristic; null means no sessions exist at all (API failed, or a
+      // genuinely non-EV account), so every slot falls back.
+      evDataStartsAt: vehicleSessionsResult.succeeded ? vehicleSessionsResult.earliestSessionStart : null,
     };
   } catch (err) {
     return {
       dispatchWindows: [],
       vehicleSessions: [],
       dispatchDebug: { step: "exception", error: err.message },
-      useEvThreshold: true,
+      evDataStartsAt: null,
     };
   }
 }
@@ -1113,6 +1132,7 @@ async function fetchVehicleChargingSessions(token, accountNumber, rangeStart, ra
     const sessions = [];
     const sample = [];
     let sessionCountBeforeRangeFilter = 0;
+    let earliestSessionStart = null;
     for (const device of devices) {
       for (const edge of device.chargingSessions?.edges ?? []) {
         const node = edge.node;
@@ -1120,6 +1140,12 @@ async function fetchVehicleChargingSessions(token, accountNumber, rangeStart, ra
         sessionCountBeforeRangeFilter++;
         const start = new Date(node.start);
         const end = new Date(node.end);
+        // Tracked across the account's whole session history (not just this
+        // request's range) - this is what tells the caller how far back
+        // real coverage actually goes, so it knows not to trust an absence
+        // of sessions before that point as "no charging happened" rather
+        // than "this integration didn't exist yet".
+        if (!earliestSessionStart || start < earliestSessionStart) earliestSessionStart = start;
         if (end <= rangeStart || start >= rangeEnd) continue;
         sessions.push({ start, end, energyKwh: energyToKwh(node.energyAdded) });
         if (sample.length < 5) {
@@ -1137,6 +1163,7 @@ async function fetchVehicleChargingSessions(token, accountNumber, rangeStart, ra
     return {
       sessions,
       succeeded: true,
+      earliestSessionStart,
       debug: {
         vehicleDeviceCount: devices.filter((d) => d.chargingSessions != null).length,
         // If this ever lands exactly on CHARGING_SESSIONS_PAGE_SIZE per
@@ -1144,6 +1171,7 @@ async function fetchVehicleChargingSessions(token, accountNumber, rangeStart, ra
         // the page size then.
         sessionCountBeforeRangeFilter,
         sessionCountInRange: sessions.length,
+        earliestSessionStart: earliestSessionStart?.toISOString() ?? null,
         sample,
       },
     };
