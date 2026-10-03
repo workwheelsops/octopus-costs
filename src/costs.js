@@ -1064,35 +1064,47 @@ async function fetchRegisteredDevices(token, accountNumber) {
   }
 }
 
-// Diagnostics only: a registered EV (e.g. the Tesla integration) likely has
-// its own charging-session data exposed somewhere in Kraken's schema, but
-// the exact query/type name isn't published anywhere reachable from this
-// sandbox. Rather than guess field names and risk a broken query, introspect
-// the live schema for anything vehicle/charging-shaped and report just the
-// matching type and field names - small, safe, and enough to write the real
-// query against next. Never throws and never affects pricing.
+// Diagnostics only: a prior broad schema scan (kept in git history) found
+// `ElectricDevice.chargingSessions` and a `DeviceChargingSession` type as
+// the likely source of a registered EV's own reported charging sessions -
+// exactly the per-slot ground truth the magnitude heuristic is guessing at.
+// This introspects those specific types' full field lists (the broad scan
+// only showed fields matching a keyword filter, which would hide plain
+// names like "start"/"end"/"energy") so the real query can be written
+// without guessing. Never throws and never affects pricing.
 async function fetchSchemaHints(token) {
+  const typeNames = [
+    "ElectricDevice",
+    "DeviceChargingSession",
+    "DeviceChargingSessionConnection",
+    "DeviceChargingSessionEdge",
+    "KrakenFlexDeviceType",
+    "SmartFlexVehicle",
+  ];
+  const typeRefFragment =
+    "fragment TypeRef on __Type { name kind ofType { name kind ofType { name kind ofType { name } } } }";
   try {
+    const query =
+      `query { ${typeNames
+        .map((name, i) => `t${i}: __type(name: "${name}") { name fields { name type { ...TypeRef } } } `)
+        .join("")}` +
+      `queryType: __type(name: "Query") { fields { name type { ...TypeRef } } } } ${typeRefFragment}`;
     const res = await fetch(KRAKEN_GRAPHQL_URL, {
       method: "POST",
       headers: { "content-type": "application/json", Authorization: token },
-      body: JSON.stringify({
-        query: "query { __schema { types { name fields { name } } } }",
-      }),
+      body: JSON.stringify({ query }),
     });
     const data = await res.json();
     if (data.errors?.length) {
       return { step: "schema", errors: data.errors.map((e) => e.message) };
     }
-    const types = data.data?.__schema?.types ?? [];
-    const keywordRe = /vehicle|charg|dispatch|session|smart/i;
-    const hints = types
-      .map((t) => ({
-        type: t.name,
-        fields: (t.fields || []).filter((f) => keywordRe.test(f.name)).map((f) => f.name),
-      }))
-      .filter((t) => t.fields.length > 0 || keywordRe.test(t.type));
-    return { matchingTypes: hints };
+    const result = {};
+    typeNames.forEach((name, i) => {
+      result[name] = data.data?.[`t${i}`] ?? null;
+    });
+    const devicesField = data.data?.queryType?.fields?.find((f) => f.name === "devices");
+    result.devicesReturnType = devicesField?.type ?? null;
+    return result;
   } catch (err) {
     return { step: "schema", error: err.message };
   }
