@@ -524,6 +524,13 @@ async function computeDailyBreakdown(env, rangeStart, rangeEnd, { includeProduct
   });
   const { rateMap, standingSegments, tariffSegments } = rateContext;
 
+  // Used both as the last-resort global heuristic (see isOffPeak) and,
+  // more reliably, as a local signal confirming which slots inside a real
+  // vehicle charging session were the actual draw (see
+  // attributeVehicleSessionSlots) - tune via OCTOPUS_EV_THRESHOLD_KWH if
+  // 2 kWh/slot (~4kW) is wrong for this household's charger/appliances.
+  const evThresholdKwh = env.OCTOPUS_EV_THRESHOLD_KWH ? Number(env.OCTOPUS_EV_THRESHOLD_KWH) : 2;
+
   // Intelligent Octopus Go's real off-peak eligibility isn't just the
   // advertised 23:30-05:30 window: Octopus grants extra "smart charge"
   // dispatch windows on top of it, which vary night to night. Fetch the
@@ -531,17 +538,7 @@ async function computeDailyBreakdown(env, rangeStart, rangeEnd, { includeProduct
   // so those bonus windows count as off-peak too.
   const { dispatchWindows, vehicleSessions, dispatchDebug, vehicleSessionsDebug, useEvThreshold } =
     await fetchDispatchWindows(apiKey, accountNumber, rangeStart, rangeEnd);
-  const evSessionSlotTimes = attributeVehicleSessionSlots(consumption, vehicleSessions);
-
-  // Intelligent Octopus Go also bills any energy routed through the smart
-  // charging system at the off-peak rate regardless of clock time - both a
-  // session that overruns the guaranteed window to hit its target, and a
-  // manual daytime top-up. There's no clean API field for "this reading was
-  // EV-routed", so approximate it: a half-hour slot using unusually high
-  // power (well above normal appliance baseline) is assumed to be EV
-  // charging. Tune via OCTOPUS_EV_THRESHOLD_KWH if 2 kWh/slot (~4kW) is
-  // wrong for this household's charger/appliances.
-  const evThresholdKwh = env.OCTOPUS_EV_THRESHOLD_KWH ? Number(env.OCTOPUS_EV_THRESHOLD_KWH) : 2;
+  const evSessionSlotTimes = attributeVehicleSessionSlots(consumption, vehicleSessions, evThresholdKwh);
 
   // Export: many solar accounts have a second, export-only meter point.
   // Auto-detect it and price its consumption (= energy sent to the grid)
@@ -1158,12 +1155,29 @@ async function fetchVehicleChargingSessions(token, accountNumber, rangeStart, ra
 // A charging session's [start, end) window is "plugged in" to "ready by",
 // not the actual draw (see fetchVehicleChargingSessions), so pricing the
 // whole window as off-peak would misclassify ordinary background
-// consumption throughout the afternoon/evening too. Instead, attribute each
-// session's own reported energyAdded to the highest-draw slots within its
-// window - the ones that actually look like charging - stopping once their
-// sum covers the reported energy. Everything else in the window is priced
-// normally. Returns a Set of slot epoch-ms timestamps.
-function attributeVehicleSessionSlots(consumption, sessions) {
+// consumption throughout the afternoon/evening too.
+//
+// It's also not just the vehicle's own energy: this household's separate
+// home battery charges overnight AND whenever a Tesla is actually charging
+// (confirmed directly by the user) - riding along in the same half-hour
+// slots, on the same meter, with no device/session data of its own. Capping
+// attribution at the session's own energyAdded (as this used to) stops
+// selecting slots before accounting for the battery's extra draw stacked on
+// top of the Tesla's in those same slots, which is exactly what made a real
+// comparison against the user's bill show on-peak cost at ~3x its true
+// share.
+//
+// So within a session's window - and ONLY within a window Octopus has
+// already confirmed real charging activity happened in, never globally -
+// treat magnitude as a reliable confirming signal: any slot drawing at
+// least evThresholdKwh is almost certainly the Tesla, the battery, or both
+// charging together, not an unrelated appliance (the false-positive that
+// made the old global heuristic unsound doesn't apply here, since every
+// window checked is already known-real). energyAdded still guards the
+// opposite failure mode - a quiet top-up that never crosses the
+// threshold - via the previous greedy-top-slots fallback. Returns a Set of
+// slot epoch-ms timestamps.
+function attributeVehicleSessionSlots(consumption, sessions, evThresholdKwh) {
   const attributed = new Set();
   const slotTimes = consumption.map((slot) => ({
     time: new Date(slot.interval_start).getTime(),
@@ -1173,12 +1187,19 @@ function attributeVehicleSessionSlots(consumption, sessions) {
     if (session.energyKwh == null) continue;
     const startMs = session.start.getTime();
     const endMs = session.end.getTime();
-    const overlapping = slotTimes
-      .filter((s) => s.time >= startMs && s.time < endMs)
-      .sort((a, b) => b.kwh - a.kwh);
+    const overlapping = slotTimes.filter((s) => s.time >= startMs && s.time < endMs);
 
+    const elevated = overlapping.filter((s) => s.kwh >= evThresholdKwh);
+    if (elevated.length > 0) {
+      for (const slot of elevated) attributed.add(slot.time);
+      continue;
+    }
+
+    // Fallback for a session that never crosses the threshold (e.g. a
+    // small top-up): attribute just enough of its highest-draw slots to
+    // cover its own reported energy.
     let remaining = session.energyKwh;
-    for (const slot of overlapping) {
+    for (const slot of [...overlapping].sort((a, b) => b.kwh - a.kwh)) {
       if (remaining <= 0) break;
       attributed.add(slot.time);
       remaining -= slot.kwh;
