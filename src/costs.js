@@ -499,11 +499,11 @@ async function computeDailyBreakdown(env, rangeStart, rangeEnd, { includeProduct
   const serial = meter.serial_number;
   const agreements = meterPoint.agreements || [];
 
-  const consumption = await fetchAllPages(
-    `${OCTOPUS_BASE}/electricity-meter-points/${mpan}/meters/${serial}/consumption/` +
-      `?period_from=${rangeStart.toISOString()}&period_to=${rangeEnd.toISOString()}` +
-      `&page_size=25000&order_by=period`,
-    authHeader
+  const consumption = await fetchConsumptionInMonthlyChunks(
+    `${OCTOPUS_BASE}/electricity-meter-points/${mpan}/meters/${serial}/consumption/`,
+    authHeader,
+    rangeStart,
+    rangeEnd
   );
 
   // If this range is empty, check whether the meter has ever reported any
@@ -1207,6 +1207,41 @@ async function fetchAllPages(firstUrl, authHeader) {
     const page = await octopusGet(url, authHeader);
     if (Array.isArray(page.results)) results.push(...page.results);
     url = page.next || null;
+  }
+  return results;
+}
+
+// A multi-year history range comfortably exceeds one page (page_size=25000
+// is ~1440 days of half-hourly readings; 24 months is ~33500 records for
+// this account), which live results confirmed is unreliable here: two
+// identical requests seconds apart returned the same total record count but
+// scrambled per-day/per-month distributions - most months differed by up to
+// 2x. Fetching one calendar month at a time instead keeps every request
+// comfortably under a single page (at most ~1500 half-hourly records), so
+// cursor-following across pages - the one part of this call that could
+// plausibly behave inconsistently against a live, frequently-corrected
+// dataset - never has to happen at all for a single month's request.
+async function fetchConsumptionInMonthlyChunks(baseUrl, authHeader, rangeStart, rangeEnd) {
+  const results = [];
+  let chunkStart = rangeStart;
+  while (chunkStart < rangeEnd) {
+    const [y, m] = londonDateKey(chunkStart).split("-").map(Number);
+    let ny = y;
+    let nm = m + 1;
+    if (nm > 12) {
+      nm = 1;
+      ny += 1;
+    }
+    const nextMonthStart = londonWallTimeToUTC(ny, nm, 1, 0, 0, 0);
+    const chunkEnd = minDate(nextMonthStart, rangeEnd);
+
+    const page = await fetchAllPages(
+      `${baseUrl}?period_from=${chunkStart.toISOString()}&period_to=${chunkEnd.toISOString()}` +
+        `&page_size=25000&order_by=period`,
+      authHeader
+    );
+    results.push(...page);
+    chunkStart = chunkEnd;
   }
   return results;
 }
