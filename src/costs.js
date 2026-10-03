@@ -1064,31 +1064,26 @@ async function fetchRegisteredDevices(token, accountNumber) {
   }
 }
 
-// Diagnostics only: a prior broad schema scan (kept in git history) found
-// `ElectricDevice.chargingSessions` and a `DeviceChargingSession` type as
-// the likely source of a registered EV's own reported charging sessions -
-// exactly the per-slot ground truth the magnitude heuristic is guessing at.
-// This introspects those specific types' full field lists (the broad scan
-// only showed fields matching a keyword filter, which would hide plain
-// names like "start"/"end"/"energy") so the real query can be written
-// without guessing. Never throws and never affects pricing.
+// Diagnostics only: confirmed SmartFlexVehicle.chargingSessions returns
+// DeviceChargingSession { start end stateOfChargeChange stateOfChargeFinal
+// energyAdded cost } - a registered EV's own reported charging sessions,
+// which is what actually explains an account's "EV-routed energy always
+// bills off-peak" behaviour, unlike the magnitude heuristic this app
+// currently guesses with. Still missing: what fields Energy/Money expose
+// (value+unit? amount+currency?) and whether chargingSessions takes a date
+// range. This introspects exactly those, to write the real query without
+// guessing. Never throws and never affects pricing.
 async function fetchSchemaHints(token) {
-  const typeNames = [
-    "ElectricDevice",
-    "DeviceChargingSession",
-    "DeviceChargingSessionConnection",
-    "DeviceChargingSessionEdge",
-    "KrakenFlexDeviceType",
-    "SmartFlexVehicle",
-  ];
   const typeRefFragment =
     "fragment TypeRef on __Type { name kind ofType { name kind ofType { name kind ofType { name } } } }";
   try {
     const query =
-      `query { ${typeNames
-        .map((name, i) => `t${i}: __type(name: "${name}") { name fields { name type { ...TypeRef } } } `)
-        .join("")}` +
-      `queryType: __type(name: "Query") { fields { name type { ...TypeRef } } } } ${typeRefFragment}`;
+      "query { " +
+      'energy: __type(name: "Energy") { name fields { name type { ...TypeRef } } } ' +
+      'money: __type(name: "Money") { name fields { name type { ...TypeRef } } } ' +
+      'vehicle: __type(name: "SmartFlexVehicle") { fields { name args { name type { ...TypeRef } } } } ' +
+      "} " +
+      typeRefFragment;
     const res = await fetch(KRAKEN_GRAPHQL_URL, {
       method: "POST",
       headers: { "content-type": "application/json", Authorization: token },
@@ -1098,13 +1093,12 @@ async function fetchSchemaHints(token) {
     if (data.errors?.length) {
       return { step: "schema", errors: data.errors.map((e) => e.message) };
     }
-    const result = {};
-    typeNames.forEach((name, i) => {
-      result[name] = data.data?.[`t${i}`] ?? null;
-    });
-    const devicesField = data.data?.queryType?.fields?.find((f) => f.name === "devices");
-    result.devicesReturnType = devicesField?.type ?? null;
-    return result;
+    const chargingSessionsField = data.data?.vehicle?.fields?.find((f) => f.name === "chargingSessions");
+    return {
+      Energy: data.data?.energy ?? null,
+      Money: data.data?.money ?? null,
+      chargingSessionsArgs: chargingSessionsField?.args ?? null,
+    };
   } catch (err) {
     return { step: "schema", error: err.message };
   }
