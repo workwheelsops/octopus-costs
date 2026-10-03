@@ -1064,14 +1064,17 @@ async function fetchVehicleChargingSessions(token, accountNumber, rangeStart, ra
       headers: { "content-type": "application/json", Authorization: token },
       body: JSON.stringify({
         query:
-          "query getChargingSessions($accountNumber: String!, $after: DateTime, $before: DateTime) { " +
+          "query getChargingSessions($accountNumber: String!, $after: DateTime) { " +
           "devices(accountNumber: $accountNumber) { id deviceType name " +
-          "... on SmartFlexVehicle { chargingSessions(after: $after, before: $before, first: 200) { " +
+          "... on SmartFlexVehicle { chargingSessions(after: $after, first: 200) { " +
           "edges { node { start end energyAdded { value unit } cost { amount currency } } } } } } }",
+        // Relay-style pagination rejects first+after+before together ("Invalid
+        // pagination parameters") - pair first with after only, and rely on
+        // the caller's own range filter (below, and again at the merge site)
+        // to drop anything past rangeEnd.
         variables: {
           accountNumber,
           after: rangeStart.toISOString(),
-          before: rangeEnd.toISOString(),
         },
       }),
     });
