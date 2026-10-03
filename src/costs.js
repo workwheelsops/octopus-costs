@@ -1021,9 +1021,7 @@ async function fetchDispatchWindows(apiKey, accountNumber, rangeStart, rangeEnd)
     // dispatch windows below, so a slot is correctly off-peak whichever of
     // the two actually explains it.
     const vehicleSessions = await fetchVehicleChargingSessions(token, accountNumber, rangeStart, rangeEnd);
-    const windows = dispatchWindowsOnly.concat(
-      vehicleSessions.windows.filter((w) => w.end > rangeStart && w.start < rangeEnd)
-    );
+    const windows = dispatchWindowsOnly.concat(vehicleSessions.windows);
 
     return {
       dispatchWindows: windows,
@@ -1057,61 +1055,73 @@ async function fetchDispatchWindows(apiKey, accountNumber, rangeStart, rangeEnd)
 // (empty windows, succeeded: false) if this account has no such device or
 // the call fails - the standard off-peak window and dispatch windows still
 // apply either way, and the caller falls back to the magnitude heuristic.
+// Confirmed live against the real API: chargingSessions rejects after/before
+// combined with first/last ("Invalid pagination parameters") and rejects
+// omitting both first and last ("You must provide a first or last value to
+// properly paginate the connection"). `first` alone is the only combination
+// that works, so the date range is applied client-side below instead (and
+// again at the merge site in fetchDispatchWindows).
+const CHARGING_SESSIONS_PAGE_SIZE = 100;
+
 async function fetchVehicleChargingSessions(token, accountNumber, rangeStart, rangeEnd) {
   try {
-    // Dropping `before` alongside first+after didn't clear "Invalid
-    // pagination parameters" (confirmed live), so the actual invalid
-    // combination is still unknown. Rather than guess again, try several
-    // plausible argument shapes against the real API in one round trip -
-    // aliased so each combo's own errors are distinguishable by path - and
-    // report which one(s) actually work. Diagnostics only until one does;
-    // falls back to the magnitude heuristic exactly as a total failure would.
     const res = await fetch(KRAKEN_GRAPHQL_URL, {
       method: "POST",
       headers: { "content-type": "application/json", Authorization: token },
       body: JSON.stringify({
         query:
-          "query getChargingSessions($accountNumber: String!, $after: DateTime) { " +
-          "firstOnly: devices(accountNumber: $accountNumber) { id " +
-          "... on SmartFlexVehicle { chargingSessions(first: 10) { edges { node { start end } } } } } " +
-          "afterOnly: devices(accountNumber: $accountNumber) { id " +
-          "... on SmartFlexVehicle { chargingSessions(after: $after) { edges { node { start end } } } } } " +
-          "lastOnly: devices(accountNumber: $accountNumber) { id " +
-          "... on SmartFlexVehicle { chargingSessions(last: 10) { edges { node { start end } } } } } " +
-          "noArgs: devices(accountNumber: $accountNumber) { id " +
-          "... on SmartFlexVehicle { chargingSessions { edges { node { start end } } } } } }",
-        variables: { accountNumber, after: rangeStart.toISOString() },
+          "query getChargingSessions($accountNumber: String!, $first: Int!) { " +
+          "devices(accountNumber: $accountNumber) { id name " +
+          "... on SmartFlexVehicle { chargingSessions(first: $first) { " +
+          "edges { node { start end energyAdded { value unit } cost { amount currency } } } } } } }",
+        variables: { accountNumber, first: CHARGING_SESSIONS_PAGE_SIZE },
       }),
     });
     const data = await res.json();
-
-    const errorsByPath = (data.errors ?? []).map((e) => ({ path: e.path, message: e.message }));
-    const combos = ["firstOnly", "afterOnly", "lastOnly", "noArgs"];
-    const windowsByCombo = {};
-    for (const combo of combos) {
-      const devices = data.data?.[combo] ?? [];
-      windowsByCombo[combo] = devices.flatMap((d) =>
-        (d.chargingSessions?.edges ?? [])
-          .map((e) => e.node)
-          .filter((n) => n?.start && n?.end)
-          .map((n) => ({ start: new Date(n.start), end: new Date(n.end) }))
-      );
+    if (data.errors?.length) {
+      return {
+        windows: [],
+        succeeded: false,
+        debug: { step: "chargingSessions", errors: data.errors.map((e) => e.message) },
+      };
     }
 
-    // A combo "worked" if its own aliased field raised no error - zero
-    // sessions in range is a legitimate success, not a failure, so this
-    // can't be judged by whether it returned any windows.
-    const hasError = (combo) => errorsByPath.some((e) => e.path?.[0] === combo);
-    const workingCombo = combos.find((c) => !hasError(c));
+    const devices = data.data?.devices ?? [];
+    const windows = [];
+    const sample = [];
+    let sessionCountBeforeRangeFilter = 0;
+    for (const device of devices) {
+      for (const edge of device.chargingSessions?.edges ?? []) {
+        const node = edge.node;
+        if (!node?.start || !node?.end) continue;
+        sessionCountBeforeRangeFilter++;
+        const start = new Date(node.start);
+        const end = new Date(node.end);
+        if (end <= rangeStart || start >= rangeEnd) continue;
+        windows.push({ start, end });
+        if (sample.length < 5) {
+          sample.push({
+            deviceName: device.name,
+            start: node.start,
+            end: node.end,
+            energyAdded: node.energyAdded,
+            cost: node.cost,
+          });
+        }
+      }
+    }
 
     return {
-      windows: workingCombo ? windowsByCombo[workingCombo] : [],
-      succeeded: !!workingCombo,
+      windows,
+      succeeded: true,
       debug: {
-        step: workingCombo ? undefined : "chargingSessions",
-        workingCombo,
-        errorsByPath,
-        sessionCountByCombo: Object.fromEntries(combos.map((c) => [c, windowsByCombo[c].length])),
+        vehicleDeviceCount: devices.filter((d) => d.chargingSessions != null).length,
+        // If this ever lands exactly on CHARGING_SESSIONS_PAGE_SIZE per
+        // device, older sessions may be getting truncated - worth raising
+        // the page size then.
+        sessionCountBeforeRangeFilter,
+        sessionCountInRange: windows.length,
+        sample,
       },
     };
   } catch (err) {
