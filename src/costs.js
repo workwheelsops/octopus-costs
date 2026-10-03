@@ -529,7 +529,7 @@ async function computeDailyBreakdown(env, rangeStart, rangeEnd, { includeProduct
   // dispatch windows on top of it, which vary night to night. Fetch the
   // account's actual completed dispatches via the (separate) GraphQL API
   // so those bonus windows count as off-peak too.
-  const { dispatchWindows, dispatchDebug, devicesDebug } = await fetchDispatchWindows(
+  const { dispatchWindows, dispatchDebug, devicesDebug, schemaHintsDebug } = await fetchDispatchWindows(
     apiKey,
     accountNumber,
     rangeStart,
@@ -719,6 +719,7 @@ async function computeDailyBreakdown(env, rangeStart, rangeEnd, { includeProduct
       export: exportDebug,
       dispatches: dispatchDebug,
       devices: devicesDebug,
+      schemaHints: schemaHintsDebug,
       evThresholdKwh,
       evThresholdReclassifiedKwh: round(evThresholdReclassifiedKwh, 3),
       evThresholdReclassifiedSlots,
@@ -1018,6 +1019,7 @@ async function fetchDispatchWindows(apiKey, accountNumber, rangeStart, rangeEnd)
     // diagnostics - this doesn't feed pricing yet, since the exact field
     // that would expose a device's own off-peak-eligible energy isn't known.
     const devicesDebug = await fetchRegisteredDevices(token, accountNumber);
+    const schemaHintsDebug = await fetchSchemaHints(token);
 
     return {
       dispatchWindows: windows,
@@ -1027,6 +1029,7 @@ async function fetchDispatchWindows(apiKey, accountNumber, rangeStart, rangeEnd)
         sample: raw.slice(0, 3),
       },
       devicesDebug,
+      schemaHintsDebug,
     };
   } catch (err) {
     return { dispatchWindows: [], dispatchDebug: { step: "exception", error: err.message } };
@@ -1058,6 +1061,40 @@ async function fetchRegisteredDevices(token, accountNumber) {
     return { devices: data.data?.devices ?? [] };
   } catch (err) {
     return { step: "devices", error: err.message };
+  }
+}
+
+// Diagnostics only: a registered EV (e.g. the Tesla integration) likely has
+// its own charging-session data exposed somewhere in Kraken's schema, but
+// the exact query/type name isn't published anywhere reachable from this
+// sandbox. Rather than guess field names and risk a broken query, introspect
+// the live schema for anything vehicle/charging-shaped and report just the
+// matching type and field names - small, safe, and enough to write the real
+// query against next. Never throws and never affects pricing.
+async function fetchSchemaHints(token) {
+  try {
+    const res = await fetch(KRAKEN_GRAPHQL_URL, {
+      method: "POST",
+      headers: { "content-type": "application/json", Authorization: token },
+      body: JSON.stringify({
+        query: "query { __schema { types { name fields { name } } } }",
+      }),
+    });
+    const data = await res.json();
+    if (data.errors?.length) {
+      return { step: "schema", errors: data.errors.map((e) => e.message) };
+    }
+    const types = data.data?.__schema?.types ?? [];
+    const keywordRe = /vehicle|charg|dispatch|session|smart/i;
+    const hints = types
+      .map((t) => ({
+        type: t.name,
+        fields: (t.fields || []).filter((f) => keywordRe.test(f.name)).map((f) => f.name),
+      }))
+      .filter((t) => t.fields.length > 0 || keywordRe.test(t.type));
+    return { matchingTypes: hints };
+  } catch (err) {
+    return { step: "schema", error: err.message };
   }
 }
 
